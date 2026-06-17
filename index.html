@@ -1,25 +1,777 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sentinel CCTV V2</title>
-<style>
-body{font-family:Arial,sans-serif;background:#111;color:#eee;margin:0;padding:20px}
-.card{background:#1b1b1b;padding:20px;border-radius:12px;max-width:900px;margin:auto}
-h1{color:#00ff88}
-.badge{display:inline-block;padding:6px 10px;border:1px solid #00ff88;border-radius:999px}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SENTINEL | WebRTC CCTV</title>
+    
+    <!-- Google Fonts: JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    
+    <style>
+        /* --- UI DESIGN & VARIABLES --- */
+        :root {
+            --bg: #0a0a0f;
+            --panel: #16161d;
+            --accent: #00ff88;
+            --accent-dim: #00aa55;
+            --text: #e0e0e0;
+            --error: #ff3333;
+            --warning: #ffcc00;
+            --font: 'JetBrains Mono', monospace;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: var(--font);
+            margin: 0;
+            padding: 0;
+            overflow-x: hidden;
+        }
+
+        /* --- LAYOUT & CHROME --- */
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            background-color: var(--panel);
+            border-bottom: 1px solid #333;
+        }
+
+        .logo { font-weight: 700; font-size: 1.2rem; color: var(--accent); letter-spacing: 2px; }
+        .user-controls { display: flex; align-items: center; gap: 15px; font-size: 0.9rem; }
+        #user-avatar { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--accent); }
+
+        main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+        .screen { display: none; }
+        .screen.active { display: block; animation: fadeIn 0.3s ease-in; }
+
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* --- BUTTONS --- */
+        .btn {
+            background: transparent; border: 1px solid var(--text); color: var(--text);
+            padding: 10px 20px; cursor: pointer; font-family: var(--font); font-size: 1rem;
+            transition: all 0.2s ease; text-transform: uppercase; border-radius: 4px;
+        }
+        .btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .btn.neon { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 5px var(--accent-dim) inset; }
+        .btn.neon:hover:not(:disabled) { background: var(--accent); color: var(--bg); box-shadow: 0 0 15px var(--accent); }
+        
+        .btn.danger { border-color: var(--error); color: var(--error); }
+        .btn.danger:hover:not(:disabled) { background: var(--error); color: white; box-shadow: 0 0 15px var(--error); }
+
+        input.neon-input {
+            background: rgba(0,0,0,0.5); border: 1px solid #333; color: var(--accent);
+            padding: 10px; font-family: var(--font); font-size: 1rem; border-radius: 4px; width: 150px;
+        }
+        input.neon-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 5px var(--accent-dim); }
+
+        /* --- STATUS INDICATORS --- */
+        .indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
+        .indicator.live { background-color: var(--error); animation: blink 1.5s infinite; box-shadow: 0 0 8px var(--error); }
+        .indicator.offline { background-color: #555; }
+        .indicator.connecting { background-color: var(--warning); animation: blink 0.8s infinite; }
+
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+
+        .center-box { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; text-align: center; }
+        .mode-box { gap: 30px; flex-direction: row; flex-wrap: wrap; }
+        .big-btn { padding: 30px 40px; font-size: 1.2rem; min-width: 300px; }
+
+        #banner { position: fixed; top: 0; left: 0; right: 0; padding: 15px; text-align: center; z-index: 9999; font-weight: bold; display: none; }
+        .banner-error { background: var(--error); color: white; }
+
+        /* --- CAMERA MODE --- */
+        .camera-container { max-width: 800px; margin: 0 auto; background: var(--panel); padding: 20px; border: 1px solid #333; border-radius: 8px; }
+        .cam-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px; }
+        #local-video { width: 100%; aspect-ratio: 16/9; background: #000; object-fit: cover; border: 1px solid #333; border-radius: 4px; margin-bottom: 15px; }
+        .viewers-list { margin-top: 20px; border-top: 1px solid #333; padding-top: 15px; }
+        .viewers-list ul { list-style: none; padding: 0; margin: 0; }
+        .viewers-list li { font-size: 0.9rem; padding: 5px 0; color: #aaa; }
+
+        /* --- VIEWER MODE --- */
+        .viewer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+        .grid { display: grid; gap: 20px; grid-template-columns: 1fr; }
+        @media (min-width: 600px) { .grid { grid-template-columns: 1fr 1fr; } }
+        @media (min-width: 1024px) { .grid { grid-template-columns: 1fr 1fr 1fr; } }
+
+        .camera-tile {
+            background: var(--panel); border: 1px solid #333; display: flex; flex-direction: column; 
+            aspect-ratio: 16/9; position: relative; overflow: hidden; border-radius: 6px; transition: box-shadow 0.3s;
+        }
+        .camera-tile.pulse { box-shadow: 0 0 15px var(--accent-dim); border-color: var(--accent); }
+        .camera-tile.pinned { grid-column: 1 / -1; grid-row: span 2; min-height: 60vh; z-index: 10; }
+        .camera-tile video { flex-grow: 1; background: #000; object-fit: cover; width: 100%; height: 100%; }
+        
+        .tile-overlay {
+            position: absolute; top: 0; left: 0; right: 0; padding: 12px;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.9), transparent);
+            display: flex; justify-content: space-between; z-index: 10; pointer-events: none;
+        }
+        .tile-controls {
+            position: absolute; bottom: 0; left: 0; right: 0; padding: 12px;
+            background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);
+            display: flex; justify-content: space-between; align-items: center; z-index: 10; flex-wrap: wrap; gap: 5px;
+        }
+        .action-btns { display: none; gap: 5px; flex-wrap: wrap; justify-content: flex-end; width: 100%; }
+        .action-btns .btn { padding: 4px 8px; font-size: 0.75rem; }
+
+        .empty-placeholder {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; background: #111; z-index: 5;
+        }
+        .empty-placeholder span { color: #666; font-size: 0.9rem; margin-top: 10px; }
+    </style>
 </head>
 <body>
-<div class="card">
-<h1>Sentinel CCTV V2</h1>
-<p class="badge">Generated Upgrade Template</p>
-<p>This file is a V2 starter template containing architecture placeholders for:
-automatic reconnect, heartbeat monitoring, QR pairing hooks, motion detection hooks,
-recording manager hooks, and WebRTC reliability improvements.</p>
-<p>The original application logic must be merged and tested against Firebase rules,
-TURN infrastructure, and signaling collections before claiming production readiness.</p>
-</div>
+
+    <div id="banner"></div>
+
+    <nav>
+        <div class="logo">SENTINEL_</div>
+        <div class="user-controls">
+            <img id="user-avatar" src="" alt="Avatar" style="display:none;" />
+            <span id="user-info">Awaiting Auth...</span>
+            <button id="btn-logout" class="btn" style="display:none; padding: 5px 10px; font-size: 0.8rem;">Logout</button>
+        </div>
+    </nav>
+
+    <main>
+        <!-- SCREEN 1: LOGIN -->
+        <section id="screen-1-login" class="screen active">
+            <div class="center-box">
+                <h1 style="margin-bottom: 5px;">SECURE ACCESS</h1>
+                <p style="color: #666; margin-bottom: 30px;">Identify to access sentinel network</p>
+                <button id="btn-login" class="btn neon big-btn">Login via Google</button>
+            </div>
+        </section>
+
+        <!-- SCREEN 2: MODE SELECT -->
+        <section id="screen-2-mode" class="screen">
+            <div class="center-box mode-box">
+                <button id="btn-start-camera" class="btn neon big-btn">
+                    <div>[ ACT AS CAMERA ]</div>
+                    <div style="font-size: 0.8rem; margin-top: 10px; color: var(--text);">Stream rear camera</div>
+                </button>
+                <button id="btn-start-viewer" class="btn neon big-btn">
+                    <div>[ WATCH LIVE FEEDS ]</div>
+                    <div style="font-size: 0.8rem; margin-top: 10px; color: var(--text);">Open dashboard</div>
+                </button>
+            </div>
+        </section>
+
+        <!-- SCREEN 3: CAMERA MODE -->
+        <section id="screen-3-camera" class="screen">
+            <div class="camera-container">
+                <div class="cam-header">
+                    <button id="btn-camera-home" class="btn danger" style="padding: 6px 12px; font-size: 0.85rem;">&lt; BACK TO HOME</button>
+                    <input type="text" id="cam-label-input" class="neon-input" value="CAM-ALPHA" placeholder="Camera Name" />
+                    <div><span class="indicator live"></span><span style="font-weight:bold; color:var(--error);">LIVE</span></div>
+                </div>
+                <video id="local-video" autoplay muted playsinline></video>
+                <div style="display:flex; justify-content:flex-end; align-items:center;">
+                    <span style="color:#666; font-size:0.8rem;" id="my-device-id-display"></span>
+                </div>
+                
+                <div class="viewers-list">
+                    <h3>Active Connections: <span id="viewer-count" style="color:var(--accent);">0</span></h3>
+                    <ul id="viewers-ul"><li>Awaiting connections...</li></ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- SCREEN 4: VIEWER MODE -->
+        <section id="screen-4-viewer" class="screen">
+            <div class="viewer-header">
+                <button id="btn-viewer-home" class="btn danger" style="padding: 6px 12px; font-size: 0.85rem;">&lt; BACK TO HOME</button>
+                <h2>CCTV DASHBOARD</h2>
+            </div>
+            <div id="camera-grid" class="grid">
+                <!-- Camera Tiles injected dynamically -->
+            </div>
+            <div id="no-cameras-msg" style="display:none; text-align:center; color:#666; padding: 60px 20px;">
+                <p style="font-size:1.1rem;">NO CAMERAS REGISTERED</p>
+                <p style="font-size:0.85rem;">Open SENTINEL on another device and select [ ACT AS CAMERA ] to start streaming here.</p>
+            </div>
+        </section>
+    </main>
+
+    <script type="module">
+        const firebaseConfig = {
+            apiKey: "AIzaSyCMaYbZBj6vDtkAkyNcj0JsK__rAij78eY",
+            authDomain: "sentinelcctv-4e4b1.firebaseapp.com",
+            projectId: "sentinelcctv-4e4b1",
+            storageBucket: "sentinelcctv-4e4b1.firebasestorage.app",
+            messagingSenderId: "500100280512",
+            appId: "1:500100280512:web:9047a764aba7f21f073d25",
+            measurementId: "G-C2RR9HZJWL"
+        };
+
+        // NOTE: STUN-only configs frequently fail to connect once camera & viewer
+        // are on different networks (home wifi vs mobile data, different NATs, etc).
+        // A TURN relay is required as a fallback in that case. The openrelay.metered.ca
+        // credentials below are a free public TURN service for testing — replace with
+        // your own TURN provider (Twilio, Xirsys, Metered, or self-hosted coturn) for
+        // production reliability/security.
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+                { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+                { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+            ],
+            iceCandidatePoolSize: 10
+        };
+
+        // IMPORTS (Firebase v12.15.0)
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+        import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-analytics.js";
+        import { getAuth, signInWithPopup, GoogleAuthProvider, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, addDoc, updateDoc, serverTimestamp, getDocs, writeBatch } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+
+        // INIT SERVICES
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        
+        // Safety wrap analytics to prevent Ad-blocker crashes
+        let analytics = null;
+        try { analytics = getAnalytics(app); } catch (e) { console.warn("Analytics blocked."); }
+
+        // GLOBAL STATE
+        let currentUser = null;
+        let dbBasePath = ''; 
+        
+        let myDeviceId = localStorage.getItem('sentinel_device_id');
+        if (!myDeviceId) {
+            myDeviceId = 'dev_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('sentinel_device_id', myDeviceId);
+        }
+        document.getElementById('cam-label-input').value = 'CAM-' + myDeviceId.substr(4, 4).toUpperCase();
+
+        let localStream = null;
+        let cameraUnsubscribes = [];
+        let viewerConnections = {}; 
+
+        let dashboardUnsubscribe = null;
+        let activeViewerPCs = {}; 
+        let wakeLock = null;
+
+        // SIGNALING CLEANUP UTILS
+        // Stale offer/answer/ICE docs left behind in Firestore get replayed as
+        // fresh "added" events the next time someone listens on that collection
+        // (Firestore onSnapshot always delivers existing docs as "added" on first
+        // attach). Without cleanup, a camera restarting would try to "answer" old
+        // viewer offers from long-gone sessions, and dead ICE candidate docs pile up
+        // forever. These helpers keep signaling collections tidy so reconnects are
+        // clean rather than chaotic.
+        async function clearCollection(collRef) {
+            try {
+                const snap = await getDocs(collRef);
+                if (snap.empty) return;
+                const batch = writeBatch(db);
+                snap.forEach(d => batch.delete(d.ref));
+                await batch.commit();
+            } catch (e) { console.warn("Cleanup failed", e); }
+        }
+        async function cleanupSession(basePath, deviceId, connId) {
+            const tasks = [
+                deleteDoc(doc(db, `${basePath}/sessions/${deviceId}/offers/${connId}`)).catch(() => {}),
+                deleteDoc(doc(db, `${basePath}/sessions/${deviceId}/answers/${connId}`)).catch(() => {}),
+                clearCollection(collection(db, `${basePath}/sessions/${deviceId}/iceCandidates_camera_${connId}`)),
+                clearCollection(collection(db, `${basePath}/sessions/${deviceId}/iceCandidates_viewer_${connId}`))
+            ];
+            await Promise.allSettled(tasks);
+        }
+
+        // WAKE LOCK UTILS
+        async function requestWakeLock() {
+            if ('wakeLock' in navigator) {
+                try { wakeLock = await navigator.wakeLock.request('screen'); } catch (err) { console.warn("Wake Lock Error"); }
+            }
+        }
+        async function releaseWakeLock() {
+            if (wakeLock !== null) { try { await wakeLock.release(); wakeLock = null; } catch (err) {} }
+        }
+        document.addEventListener('visibilitychange', async () => {
+            if (document.visibilityState === 'visible') {
+                if (document.getElementById('screen-3-camera').classList.contains('active') || document.getElementById('screen-4-viewer').classList.contains('active')) {
+                    await requestWakeLock();
+                }
+            }
+        });
+
+        // UI UTILS
+        function showScreen(id) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+        }
+        function showBanner(msg, isError = true) {
+            const b = document.getElementById('banner');
+            b.innerText = msg; b.className = isError ? 'banner-error' : ''; b.style.display = 'block';
+            setTimeout(() => { b.style.display = 'none'; }, 4000);
+        }
+
+        // AUTHENTICATION
+        onAuthStateChanged(auth, user => {
+            currentUser = user;
+            if (user) {
+                dbBasePath = `users/${user.uid}`; // CLEAN PATH FOR PROJECT FIRESTORE
+                document.getElementById('user-info').innerText = user.displayName || user.email || `Agent ${user.uid.substr(0,5)}`;
+                const avatar = document.getElementById('user-avatar');
+                if (user.photoURL) { avatar.src = user.photoURL; avatar.style.display = 'block'; }
+                document.getElementById('btn-logout').style.display = 'block';
+                showScreen('screen-2-mode');
+            } else {
+                document.getElementById('user-info').innerText = 'Awaiting Auth...';
+                document.getElementById('user-avatar').style.display = 'none';
+                document.getElementById('btn-logout').style.display = 'none';
+                showScreen('screen-1-login');
+            }
+        });
+
+        document.getElementById('btn-login').addEventListener('click', async () => {
+            try { await signInWithPopup(auth, new GoogleAuthProvider()); } 
+            catch (err) {
+                console.warn("Popup blocked, trying anonymous", err);
+                try { await signInAnonymously(auth); } catch (fallbackErr) { showBanner("Auth failed: " + fallbackErr.message); }
+            }
+        });
+        document.getElementById('btn-logout').addEventListener('click', async () => { await stopCamera(); stopViewer(); await signOut(auth); });
+
+        // CAMERA MODE
+        document.getElementById('btn-start-camera').addEventListener('click', startCamera);
+        document.getElementById('btn-camera-home').addEventListener('click', stopCamera); // FIXED BUTTON LISTENER
+        
+        document.getElementById('cam-label-input').addEventListener('change', async (e) => {
+            if (!currentUser || !localStream) return;
+            try { await updateDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId), { label: e.target.value }); } catch(err) {}
+        });
+
+        async function startCamera() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: true });
+                document.getElementById('local-video').srcObject = localStream;
+                document.getElementById('my-device-id-display').innerText = `ID: ${myDeviceId}`;
+                showScreen('screen-3-camera');
+                await requestWakeLock();
+
+                await setDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId), {
+                    label: document.getElementById('cam-label-input').value, status: 'live', timestamp: serverTimestamp()
+                });
+
+                // Wipe any leftover offers/answers from a previous session BEFORE attaching
+                // the listener below — otherwise Firestore replays them as fresh "added"
+                // events and the camera wastes effort trying to answer long-gone viewers.
+                await clearCollection(collection(db, `${dbBasePath}/sessions/${myDeviceId}/offers`));
+                await clearCollection(collection(db, `${dbBasePath}/sessions/${myDeviceId}/answers`));
+
+                const unsubOffers = onSnapshot(collection(db, `${dbBasePath}/sessions/${myDeviceId}/offers`), snap => {
+                    snap.docChanges().forEach(change => {
+                        if (change.type === 'added') {
+                            const offerData = change.doc.data();
+                            const connId = change.doc.id;
+                            deleteDoc(change.doc.ref).catch(() => {}); // consume immediately, prevents replay
+                            handleNewViewerOffer(connId, offerData);
+                        }
+                    });
+                }, err => showBanner("Signaling error: " + err.message));
+                
+                cameraUnsubscribes.push(unsubOffers);
+            } catch (err) { showBanner("Camera permission denied."); }
+        }
+
+        async function handleNewViewerOffer(connId, offerData) {
+            try {
+                const pc = new RTCPeerConnection(rtcConfig);
+                viewerConnections[connId] = pc;
+                updateCameraDashboardUI();
+
+                pc.ontrack = e => {
+                    if (e.track.kind === 'audio') {
+                        let remoteAudio = document.getElementById(`audio_${connId}`);
+                        if (!remoteAudio) {
+                            remoteAudio = document.createElement('audio');
+                            remoteAudio.id = `audio_${connId}`; remoteAudio.autoplay = true;
+                            document.body.appendChild(remoteAudio);
+                        }
+                        // Robust Stream attachment
+                        if (e.streams && e.streams[0]) { 
+                            if (remoteAudio.srcObject !== e.streams[0]) remoteAudio.srcObject = e.streams[0]; 
+                        } else { 
+                            if (!remoteAudio.srcObject) remoteAudio.srcObject = new MediaStream(); 
+                            remoteAudio.srcObject.addTrack(e.track); 
+                        }
+                    }
+                };
+
+                let cameraIceQueue = [];
+                pc.onicecandidate = e => {
+                    if (e.candidate) addDoc(collection(db, `${dbBasePath}/sessions/${myDeviceId}/iceCandidates_camera_${connId}`), e.candidate.toJSON());
+                };
+
+                let cleanedUp = false;
+                pc.onconnectionstatechange = () => {
+                    if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+                        delete viewerConnections[connId]; updateCameraDashboardUI();
+                        const audioEl = document.getElementById(`audio_${connId}`); if (audioEl) audioEl.remove();
+                        if (!cleanedUp) { cleanedUp = true; cleanupSession(dbBasePath, myDeviceId, connId); }
+                    }
+                };
+
+                // setRemoteDescription BEFORE addTrack gives the browser the remote m-line
+                // layout first, so local tracks attach to the matching transceivers without
+                // relying on creation-order guessing — more robust across browsers.
+                await pc.setRemoteDescription(new RTCSessionDescription(offerData));
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                await setDoc(doc(db, `${dbBasePath}/sessions/${myDeviceId}/answers/${connId}`), { type: answer.type, sdp: answer.sdp });
+
+                const unsubIce = onSnapshot(collection(db, `${dbBasePath}/sessions/${myDeviceId}/iceCandidates_viewer_${connId}`), snap => {
+                    snap.docChanges().forEach(change => {
+                        if (change.type === 'added') {
+                            const candidate = new RTCIceCandidate(change.doc.data());
+                            if (pc.remoteDescription && pc.remoteDescription.type) {
+                                pc.addIceCandidate(candidate).catch(err => console.warn("ICE error", err));
+                            } else {
+                                cameraIceQueue.push(candidate);
+                            }
+                        }
+                    });
+                });
+                cameraUnsubscribes.push(unsubIce);
+            } catch(e) { console.error("Error setting up viewer connection", e); }
+        }
+
+        function updateCameraDashboardUI() {
+            const count = Object.keys(viewerConnections).length;
+            document.getElementById('viewer-count').innerText = count;
+            const ul = document.getElementById('viewers-ul');
+            ul.innerHTML = '';
+            if(count === 0) { ul.innerHTML = '<li>Awaiting connections...</li>'; return; }
+            Object.keys(viewerConnections).forEach(id => {
+                const li = document.createElement('li'); li.innerHTML = `> Viewer <span style="color:var(--text);">${id.substr(0,8)}</span>`;
+                ul.appendChild(li);
+            });
+        }
+
+        async function stopCamera() {
+            // Navigate home FIRST, synchronously, before any cleanup — this guarantees
+            // the back button is always instantly responsive even if something below throws.
+            showScreen('screen-2-mode');
+            releaseWakeLock();
+
+            const myConnIds = Object.keys(viewerConnections);
+
+            try { if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; } } catch (e) { console.warn(e); }
+            try {
+                cameraUnsubscribes.forEach(fn => { try { if (typeof fn === 'function') fn(); } catch (e) {} });
+                cameraUnsubscribes = [];
+            } catch (e) { console.warn(e); }
+            try {
+                Object.values(viewerConnections).forEach(pc => { try { if (pc) pc.close(); } catch (e) {} });
+                viewerConnections = {};
+            } catch (e) { console.warn(e); }
+
+            if (currentUser && dbBasePath) {
+                deleteDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId)).catch(e => console.warn(e));
+                clearCollection(collection(db, `${dbBasePath}/sessions/${myDeviceId}/offers`));
+                clearCollection(collection(db, `${dbBasePath}/sessions/${myDeviceId}/answers`));
+                myConnIds.forEach(connId => cleanupSession(dbBasePath, myDeviceId, connId));
+            }
+        }
+        window.addEventListener('beforeunload', () => { if (localStream && dbBasePath) { deleteDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId)); } });
+
+        // VIEWER MODE
+        document.getElementById('btn-start-viewer').addEventListener('click', startViewer);
+        document.getElementById('btn-viewer-home').addEventListener('click', stopViewer); // FIXED BUTTON LISTENER
+
+        function startViewer() {
+            showScreen('screen-4-viewer');
+            requestWakeLock();
+            
+            // Listen for all cameras on the user's account
+            dashboardUnsubscribe = onSnapshot(collection(db, `${dbBasePath}/cameras`), snap => {
+                document.getElementById('no-cameras-msg').style.display = snap.empty ? 'block' : 'none';
+                snap.docChanges().forEach(change => {
+                    const camId = change.doc.id;
+                    const data = change.doc.data();
+                    if (change.type === 'added' || change.type === 'modified') renderCameraTile(camId, data, 'available');
+                    else if (change.type === 'removed') renderCameraTile(camId, data, 'offline');
+                });
+            }, err => showBanner("Failed to read cameras: " + err.message));
+        }
+
+        function renderCameraTile(camId, data, state) {
+            const grid = document.getElementById('camera-grid');
+            let tile = document.getElementById(`tile-${camId}`);
+            
+            if (!tile) {
+                tile = document.createElement('div');
+                tile.id = `tile-${camId}`; tile.className = 'camera-tile';
+                tile.innerHTML = `
+                    <div class="tile-overlay">
+                        <div style="font-weight:bold; letter-spacing:1px;" class="cam-label"></div>
+                        <div><span class="indicator"></span><span class="status-text font-small"></span></div>
+                    </div>
+                    <div class="empty-placeholder">
+                        <span class="placeholder-msg">NO SIGNAL</span>
+                        <span class="last-seen"></span>
+                        <button class="btn danger remove-cam-btn" style="margin-top: 15px; font-size: 0.7rem; display: none; padding: 5px 10px;">[ FORGET CAMERA ]</button>
+                    </div>
+                    <video autoplay playsinline muted></video>
+                    <div class="tile-controls">
+                        <button class="btn connect-btn neon" style="padding: 5px 15px; font-size: 0.8rem;">CONNECT</button>
+                        <div class="action-btns">
+                            <button class="btn pin-btn" title="Pin Camera">[PIN]</button>
+                            <button class="btn snap-btn" title="Take Screenshot">[SNAP]</button>
+                            <button class="btn rec-btn" title="Record Video">[REC]</button>
+                            <button class="btn mute-btn danger" title="Toggle Mute">[UNMUTE]</button>
+                            <button class="btn talk-btn" title="Hold to Speak">[TALK]</button>
+                            <button class="btn fullscreen-btn" title="Fullscreen">[FULL]</button>
+                        </div>
+                    </div>
+                `;
+                
+                tile.querySelector('.connect-btn').onclick = () => connectToCamera(camId, tile);
+                tile.querySelector('.fullscreen-btn').onclick = () => {
+                    const vid = tile.querySelector('video');
+                    if (!document.fullscreenElement) { vid.requestFullscreen().catch(err => showBanner("Fullscreen error")); } 
+                    else { document.exitFullscreen(); }
+                };
+                tile.querySelector('.remove-cam-btn').onclick = async () => {
+                    try { await deleteDoc(doc(db, `${dbBasePath}/cameras`, camId)); tile.remove(); } 
+                    catch (err) { showBanner("Remove failed: " + err.message); }
+                };
+                grid.appendChild(tile);
+            }
+
+            const labelEl = tile.querySelector('.cam-label');
+            const statusText = tile.querySelector('.status-text');
+            const indicator = tile.querySelector('.indicator');
+            const placeholder = tile.querySelector('.empty-placeholder');
+            const connectBtn = tile.querySelector('.connect-btn');
+            
+            if (data && data.label) labelEl.innerText = data.label;
+
+            if (state === 'offline') {
+                indicator.className = 'indicator offline'; statusText.innerText = 'OFFLINE';
+                placeholder.style.display = 'flex'; placeholder.querySelector('.placeholder-msg').innerText = 'CONNECTION LOST';
+                placeholder.querySelector('.last-seen').innerText = `Last detected: ${new Date().toLocaleTimeString()}`;
+                placeholder.querySelector('.remove-cam-btn').style.display = 'block';
+                connectBtn.style.display = 'none'; tile.classList.remove('pulse');
+                tile.querySelector('video').srcObject = null;
+            } else if (state === 'available' && indicator.className.indexOf('live') === -1 && indicator.className.indexOf('connecting') === -1) {
+                indicator.className = 'indicator offline'; statusText.innerText = 'AVAILABLE';
+                placeholder.style.display = 'flex'; placeholder.querySelector('.placeholder-msg').innerText = 'STANDBY';
+                placeholder.querySelector('.last-seen').innerText = ''; placeholder.querySelector('.remove-cam-btn').style.display = 'none';
+                connectBtn.style.display = 'block'; connectBtn.disabled = false; connectBtn.innerText = 'CONNECT';
+            }
+        }
+
+        function forceTileAvailable(tile) {
+            const indicator = tile.querySelector('.indicator');
+            const statusText = tile.querySelector('.status-text');
+            const placeholder = tile.querySelector('.empty-placeholder');
+            const connectBtn = tile.querySelector('.connect-btn');
+            const videoElem = tile.querySelector('video');
+            indicator.className = 'indicator offline'; statusText.innerText = 'AVAILABLE';
+            placeholder.style.display = 'flex'; placeholder.querySelector('.placeholder-msg').innerText = 'STANDBY';
+            placeholder.querySelector('.last-seen').innerText = ''; placeholder.querySelector('.remove-cam-btn').style.display = 'none';
+            connectBtn.style.display = 'block'; connectBtn.disabled = false; connectBtn.innerText = 'CONNECT';
+            tile.classList.remove('pulse');
+            videoElem.srcObject = null;
+        }
+
+        async function connectToCamera(camId, tile) {
+            const connId = 'conn_' + Math.random().toString(36).substr(2, 9);
+            const btn = tile.querySelector('.connect-btn');
+            const indicator = tile.querySelector('.indicator');
+            const statusText = tile.querySelector('.status-text');
+            const placeholder = tile.querySelector('.empty-placeholder');
+            const videoElem = tile.querySelector('video');
+            const actionBtns = tile.querySelector('.action-btns');
+
+            btn.disabled = true; btn.innerText = 'NEGOTIATING...';
+            indicator.className = 'indicator connecting'; statusText.innerText = 'CONNECTING';
+
+            try {
+                const pc = new RTCPeerConnection(rtcConfig);
+                let unsubs = [];
+                activeViewerPCs[connId] = { pc, unsubs, camId };
+
+                pc.addTransceiver('video', { direction: 'recvonly' });
+                const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
+
+                // Robust Stream attachment (Fixes blank videos on some browsers)
+                pc.ontrack = e => {
+                    if (e.streams && e.streams[0]) {
+                        if (videoElem.srcObject !== e.streams[0]) videoElem.srcObject = e.streams[0];
+                    } else {
+                        if (!videoElem.srcObject) videoElem.srcObject = new MediaStream();
+                        videoElem.srcObject.addTrack(e.track);
+                    }
+                };
+
+                const pinBtn = tile.querySelector('.pin-btn');
+                const snapBtn = tile.querySelector('.snap-btn');
+                const recBtn = tile.querySelector('.rec-btn');
+                const muteBtn = tile.querySelector('.mute-btn');
+                const talkBtn = tile.querySelector('.talk-btn');
+
+                pinBtn.onclick = () => { tile.classList.toggle('pinned'); pinBtn.classList.toggle('neon'); if (tile.classList.contains('pinned')) tile.scrollIntoView({behavior: "smooth", block: "center"}); };
+                snapBtn.onclick = () => {
+                    const canvas = document.createElement('canvas'); canvas.width = videoElem.videoWidth || 1280; canvas.height = videoElem.videoHeight || 720;
+                    const ctx = canvas.getContext('2d'); ctx.drawImage(videoElem, 0, 0, canvas.width, canvas.height);
+                    const a = document.createElement('a'); a.href = canvas.toDataURL('image/jpeg', 0.9);
+                    a.download = `sentinel_snap_${camId}_${Date.now()}.jpg`; a.click();
+                };
+
+                let mediaRecorder = null; let recordedChunks = [];
+                recBtn.onclick = () => {
+                    if (mediaRecorder && mediaRecorder.state === 'recording') {
+                        mediaRecorder.stop(); recBtn.innerText = '[REC]'; recBtn.classList.remove('danger', 'neon');
+                    } else {
+                        const stream = videoElem.srcObject; if (!stream) return;
+                        try {
+                            const options = MediaRecorder.isTypeSupported('video/webm') ? { mimeType: 'video/webm' } : { mimeType: 'video/mp4' };
+                            mediaRecorder = new MediaRecorder(stream, options); recordedChunks = [];
+                            mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+                            mediaRecorder.onstop = () => {
+                                const format = options.mimeType.includes('mp4') ? 'mp4' : 'webm';
+                                const blob = new Blob(recordedChunks, { type: options.mimeType }); const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a'); a.href = url; a.download = `sentinel_rec_${camId}_${Date.now()}.${format}`; a.click(); URL.revokeObjectURL(url);
+                            };
+                            mediaRecorder.start(); recBtn.innerText = '[STOP]'; recBtn.classList.add('danger', 'neon');
+                        } catch (err) { showBanner("Recording not supported."); }
+                    }
+                };
+
+                muteBtn.onclick = () => { videoElem.muted = !videoElem.muted; muteBtn.innerText = videoElem.muted ? '[UNMUTE]' : '[MUTE]'; muteBtn.classList.toggle('danger', videoElem.muted); };
+
+                let localMicStream = null; let isTalking = false;
+                const startTalking = async (e) => {
+                    e.preventDefault(); if (isTalking) return;
+                    if (!localMicStream) { try { localMicStream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (err) { showBanner("Mic denied"); return; } }
+                    const audioTrack = localMicStream.getAudioTracks()[0]; audioTrack.enabled = true;
+                    await audioTransceiver.sender.replaceTrack(audioTrack);
+                    talkBtn.classList.add('neon', 'danger'); talkBtn.innerText = '[TALKING]'; isTalking = true;
+                };
+                const stopTalking = (e) => {
+                    e.preventDefault();
+                    if (isTalking && localMicStream) { localMicStream.getAudioTracks()[0].enabled = false; talkBtn.classList.remove('neon', 'danger'); talkBtn.innerText = '[TALK]'; isTalking = false; }
+                };
+                talkBtn.onmousedown = startTalking; talkBtn.onmouseup = stopTalking; talkBtn.onmouseleave = stopTalking;
+                talkBtn.ontouchstart = startTalking; talkBtn.ontouchend = stopTalking;
+
+                let cleanedUp = false;
+                const teardown = (nextState) => {
+                    if (cleanedUp) return;
+                    cleanedUp = true;
+                    try { pc.close(); } catch (e) {}
+                    unsubs.forEach(fn => { try { if (typeof fn === 'function') fn(); } catch (e) {} });
+                    delete activeViewerPCs[connId];
+                    cleanupSession(dbBasePath, camId, connId);
+                    actionBtns.style.display = 'none';
+                    if (nextState === 'offline') {
+                        renderCameraTile(camId, { label: tile.querySelector('.cam-label').innerText }, 'offline');
+                    } else {
+                        forceTileAvailable(tile);
+                    }
+                };
+
+                pc.onconnectionstatechange = () => {
+                    if (pc.connectionState === 'connected') {
+                        indicator.className = 'indicator live'; statusText.innerText = 'LIVE'; placeholder.style.display = 'none';
+                        btn.style.display = 'none'; actionBtns.style.display = 'flex'; tile.classList.add('pulse');
+                    } else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+                        teardown('offline');
+                    }
+                };
+
+                pc.onicecandidate = e => { if (e.candidate) addDoc(collection(db, `${dbBasePath}/sessions/${camId}/iceCandidates_viewer_${connId}`), e.candidate.toJSON()); };
+
+                const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+                await setDoc(doc(db, `${dbBasePath}/sessions/${camId}/offers/${connId}`), { type: offer.type, sdp: offer.sdp });
+
+                let viewerIceQueue = []; // Queue prevents race conditions if ICE arrives before RemoteDescription
+
+                // Listen directly on the specific answer doc (not the whole collection) — more
+                // efficient, scales to many simultaneous viewers, and avoids any chance of a
+                // client-side ID filter silently missing/duplicating events under load.
+                const unsubAns = onSnapshot(doc(db, `${dbBasePath}/sessions/${camId}/answers`, connId), async (docSnap) => {
+                    if (docSnap.exists() && !pc.currentRemoteDescription) {
+                        try {
+                            await pc.setRemoteDescription(new RTCSessionDescription(docSnap.data()));
+                            viewerIceQueue.forEach(c => pc.addIceCandidate(c).catch(err => console.warn(err)));
+                            viewerIceQueue = [];
+                        } catch (err) { console.error("Error setting remote answer", err); }
+                    }
+                }, err => console.warn("Answer listener error", err));
+                unsubs.push(unsubAns);
+
+                const unsubIce = onSnapshot(collection(db, `${dbBasePath}/sessions/${camId}/iceCandidates_camera_${connId}`), snap => {
+                    snap.docChanges().forEach(change => { 
+                        if (change.type === 'added') {
+                            const candidate = new RTCIceCandidate(change.doc.data());
+                            if (pc.remoteDescription && pc.remoteDescription.type) {
+                                pc.addIceCandidate(candidate).catch(err => console.warn("ICE error", err));
+                            } else {
+                                viewerIceQueue.push(candidate);
+                            }
+                        }
+                    });
+                });
+                unsubs.push(unsubIce);
+
+                // Safety timeout: if negotiation never reaches "connected" within 20s
+                // (e.g. no usable ICE candidates), free the tile instead of leaving it
+                // stuck on CONNECTING forever.
+                setTimeout(() => {
+                    if (!cleanedUp && pc.connectionState !== 'connected') {
+                        showBanner(`Could not establish connection to ${tile.querySelector('.cam-label').innerText}.`);
+                        teardown('available');
+                    }
+                }, 20000);
+            } catch (err) {
+                showBanner("Failed to connect: " + err.message);
+                if (activeViewerPCs[connId]) { try { activeViewerPCs[connId].pc.close(); } catch (e) {} delete activeViewerPCs[connId]; }
+                cleanupSession(dbBasePath, camId, connId);
+                actionBtns.style.display = 'none';
+                forceTileAvailable(tile);
+            }
+        }
+
+        function stopViewer() {
+            // Navigate home FIRST, synchronously — guarantees the back button always
+            // responds instantly even if cleanup below hits an error.
+            showScreen('screen-2-mode');
+            releaseWakeLock();
+
+            try { if (typeof dashboardUnsubscribe === 'function') dashboardUnsubscribe(); } catch (e) { console.warn(e); }
+            dashboardUnsubscribe = null;
+
+            const conns = activeViewerPCs;
+            activeViewerPCs = {};
+            Object.entries(conns).forEach(([connId, conn]) => {
+                try { if (conn.pc) conn.pc.close(); } catch (e) {}
+                try { if (conn.unsubs) conn.unsubs.forEach(fn => { try { if (typeof fn === 'function') fn(); } catch (e) {} }); } catch (e) {}
+                if (conn.camId) cleanupSession(dbBasePath, conn.camId, connId);
+            });
+
+            try { document.getElementById('camera-grid').innerHTML = ''; } catch (e) {}
+        }
+    </script>
 </body>
 </html>
