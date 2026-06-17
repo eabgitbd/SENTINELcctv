@@ -312,7 +312,7 @@
 
         async function startCamera() {
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
+                localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: true });
                 document.getElementById('local-video').srcObject = localStream;
                 document.getElementById('my-device-id-display').innerText = `ID: ${myDeviceId}`;
                 showScreen('screen-3-camera');
@@ -347,8 +347,12 @@
                             document.body.appendChild(remoteAudio);
                         }
                         // Robust Stream attachment
-                        if (e.streams && e.streams[0]) { remoteAudio.srcObject = e.streams[0]; } 
-                        else { let ms = new MediaStream(); ms.addTrack(e.track); remoteAudio.srcObject = ms; }
+                        if (e.streams && e.streams[0]) { 
+                            if (remoteAudio.srcObject !== e.streams[0]) remoteAudio.srcObject = e.streams[0]; 
+                        } else { 
+                            if (!remoteAudio.srcObject) remoteAudio.srcObject = new MediaStream(); 
+                            remoteAudio.srcObject.addTrack(e.track); 
+                        }
                     }
                 };
 
@@ -402,7 +406,8 @@
             viewerConnections = {};
             
             if (currentUser && dbBasePath) {
-                try { await deleteDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId)); } catch(e){}
+                // Removed 'await' so a slow network won't freeze the back button
+                deleteDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId)).catch(e => console.warn(e));
             }
             showScreen('screen-2-mode');
             releaseWakeLock();
@@ -445,14 +450,14 @@
                         <span class="last-seen"></span>
                         <button class="btn danger remove-cam-btn" style="margin-top: 15px; font-size: 0.7rem; display: none; padding: 5px 10px;">[ FORGET CAMERA ]</button>
                     </div>
-                    <video autoplay playsinline></video>
+                    <video autoplay playsinline muted></video>
                     <div class="tile-controls">
                         <button class="btn connect-btn neon" style="padding: 5px 15px; font-size: 0.8rem;">CONNECT</button>
                         <div class="action-btns">
                             <button class="btn pin-btn" title="Pin Camera">[PIN]</button>
                             <button class="btn snap-btn" title="Take Screenshot">[SNAP]</button>
                             <button class="btn rec-btn" title="Record Video">[REC]</button>
-                            <button class="btn mute-btn" title="Toggle Mute">[MUTE]</button>
+                            <button class="btn mute-btn danger" title="Toggle Mute">[UNMUTE]</button>
                             <button class="btn talk-btn" title="Hold to Speak">[TALK]</button>
                             <button class="btn fullscreen-btn" title="Fullscreen">[FULL]</button>
                         </div>
@@ -520,7 +525,8 @@
                     if (e.streams && e.streams[0]) {
                         if (videoElem.srcObject !== e.streams[0]) videoElem.srcObject = e.streams[0];
                     } else {
-                        let ms = new MediaStream(); ms.addTrack(e.track); videoElem.srcObject = ms;
+                        if (!videoElem.srcObject) videoElem.srcObject = new MediaStream();
+                        videoElem.srcObject.addTrack(e.track);
                     }
                 };
 
@@ -591,13 +597,32 @@
                 const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
                 await setDoc(doc(db, `${dbBasePath}/sessions/${camId}/offers/${connId}`), { type: offer.type, sdp: offer.sdp });
 
+                let viewerIceQueue = []; // Queue prevents race conditions if ICE arrives before RemoteDescription
+
                 const unsubAns = onSnapshot(collection(db, `${dbBasePath}/sessions/${camId}/answers`), snap => {
-                    snap.docChanges().forEach(change => { if (change.doc.id === connId && change.type === 'added') pc.setRemoteDescription(new RTCSessionDescription(change.doc.data())); });
+                    snap.docChanges().forEach(async change => { 
+                        if (change.doc.id === connId && change.type === 'added') {
+                            try {
+                                await pc.setRemoteDescription(new RTCSessionDescription(change.doc.data()));
+                                viewerIceQueue.forEach(c => pc.addIceCandidate(c).catch(err => console.warn(err)));
+                                viewerIceQueue = [];
+                            } catch (err) { console.error("Error setting remote answer", err); }
+                        }
+                    });
                 });
                 unsubs.push(unsubAns);
 
                 const unsubIce = onSnapshot(collection(db, `${dbBasePath}/sessions/${camId}/iceCandidates_camera_${connId}`), snap => {
-                    snap.docChanges().forEach(change => { if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data())); });
+                    snap.docChanges().forEach(change => { 
+                        if (change.type === 'added') {
+                            const candidate = new RTCIceCandidate(change.doc.data());
+                            if (pc.remoteDescription && pc.remoteDescription.type) {
+                                pc.addIceCandidate(candidate).catch(err => console.warn("ICE error", err));
+                            } else {
+                                viewerIceQueue.push(candidate);
+                            }
+                        }
+                    });
                 });
                 unsubs.push(unsubIce);
             } catch (err) {
