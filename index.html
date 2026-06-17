@@ -278,15 +278,15 @@
     <script type="module">
         /**
          * FIREBASE CONFIGURATION
-         * Replace with your Firebase Project config.
          */
         const firebaseConfig = {
-            apiKey: "YOUR_API_KEY",
-            authDomain: "YOUR_PROJECT.firebaseapp.com",
-            projectId: "YOUR_PROJECT_ID",
-            storageBucket: "YOUR_PROJECT.appspot.com",
-            messagingSenderId: "YOUR_SENDER_ID",
-            appId: "YOUR_APP_ID"
+            apiKey: "AIzaSyCMaYbZBj6vDtkAkyNcj0JsK__rAij78eY",
+            authDomain: "sentinelcctv-4e4b1.firebaseapp.com",
+            projectId: "sentinelcctv-4e4b1",
+            storageBucket: "sentinelcctv-4e4b1.firebasestorage.app",
+            messagingSenderId: "500100280512",
+            appId: "1:500100280512:web:9047a764aba7f21f073d25",
+            measurementId: "G-C2RR9HZJWL"
         };
 
         // Environment adaptation for previews
@@ -307,13 +307,15 @@
             ]
         };
 
-        // --- IMPORTS (Firebase v10/11 CDN ESM) ---
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
-        import { getAuth, signInWithPopup, GoogleAuthProvider, signInWithCustomToken, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
-        import { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, deleteDoc, addDoc, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+        // --- IMPORTS (Firebase v12 CDN ESM) ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+        import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-analytics.js";
+        import { getAuth, signInWithPopup, GoogleAuthProvider, signInWithCustomToken, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, deleteDoc, addDoc, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
 
         // --- INIT SERVICES ---
         const app = initializeApp(finalConfig);
+        const analytics = getAnalytics(app);
         const auth = getAuth(app);
         const db = getFirestore(app);
 
