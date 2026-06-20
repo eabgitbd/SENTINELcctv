@@ -147,6 +147,7 @@
         <div class="user-controls">
             <img id="user-avatar" src="" alt="Avatar" style="display:none;" />
             <span id="user-info">Awaiting Auth...</span>
+            <span id="user-uid-tag" style="display:none; font-size:0.7rem; color:#666; border:1px solid #333; padding:2px 6px; border-radius:3px;" title="This must match on every device for cameras and viewers to see each other"></span>
             <button id="btn-logout" class="btn" style="display:none; padding: 5px 10px; font-size: 0.8rem;">Logout</button>
         </div>
     </nav>
@@ -224,7 +225,7 @@
         // IMPORTS (Firebase v12.15.0)
         import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
         import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-analytics.js";
-        import { getAuth, signInWithPopup, GoogleAuthProvider, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
+        import { getAuth, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, addDoc, updateDoc, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
 
         // INIT SERVICES
@@ -319,25 +320,80 @@
                 if (user.photoURL) { avatar.src = user.photoURL; avatar.style.display = 'block'; }
                 else { avatar.style.display = 'none'; }
                 document.getElementById('btn-logout').style.display = 'block';
+
+                // BUGFIX: surface the account identity so a mismatch between two
+                // devices (the original root cause of cameras being invisible on the
+                // dashboard) is visible at a glance instead of failing silently.
+                const uidTag = document.getElementById('user-uid-tag');
+                uidTag.innerText = 'ID: ' + user.uid.substring(0, 8);
+                uidTag.style.display = 'inline-block';
+                if (user.isAnonymous) {
+                    uidTag.style.color = 'var(--warning)';
+                    uidTag.style.borderColor = 'var(--warning)';
+                    showBanner('Signed in anonymously — this device will NOT see cameras/viewers signed in with your Google account. Please log out and sign in with Google on every device you use.', true);
+                } else {
+                    uidTag.style.color = '#666';
+                    uidTag.style.borderColor = '#333';
+                }
+
                 showScreen('screen-2-mode');
             } else {
                 document.getElementById('user-info').innerText = 'Awaiting Auth...';
                 document.getElementById('user-avatar').style.display = 'none';
                 document.getElementById('btn-logout').style.display = 'none';
+                document.getElementById('user-uid-tag').style.display = 'none';
                 showScreen('screen-1-login');
             }
         });
 
-        document.getElementById('btn-login').addEventListener('click', async (e) => {
-            const btn = e.currentTarget;
+        // BUGFIX (root cause of "dashboard shows nothing from another device"):
+        // The old code fell back to signInAnonymously() whenever the popup failed —
+        // which happens routinely on phones (in-app browsers, iOS Safari storage
+        // partitioning, popup blockers). Anonymous sign-in mints a brand-new random
+        // uid every time, completely unrelated to the real Google account. Since all
+        // Firestore data lives under `users/${uid}/...`, a camera phone that silently
+        // fell back to anonymous auth was writing to a totally different, invisible
+        // path than the viewer's account — so the camera could never appear on the
+        // dashboard. This had nothing to do with "Google activity interference"; it
+        // was two devices ending up authenticated as two different identities with
+        // zero indication that had happened.
+        //
+        // Fix: try popup first (best UX on desktop), and if it fails for any reason
+        // OTHER than the user deliberately closing it, fall back to a full-page
+        // redirect — which works reliably even in restrictive mobile/in-app browser
+        // contexts — instead of silently downgrading to an anonymous, disconnected
+        // identity. No more silent anonymous fallback, anywhere.
+        async function doLogin() {
+            const btn = document.getElementById('btn-login');
             btn.disabled = true;
+            btn.innerText = 'Connecting...';
             try {
                 await signInWithPopup(auth, new GoogleAuthProvider());
+                // onAuthStateChanged will handle navigation
             } catch (err) {
-                console.warn("Popup blocked, trying anonymous", err);
-                try { await signInAnonymously(auth); } catch (fallbackErr) { showBanner("Auth failed: " + fallbackErr.message); }
-            } finally {
-                btn.disabled = false;
+                console.warn("Popup sign-in failed, falling back to redirect:", err.code);
+                if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
+                    // User deliberately closed it — don't force a redirect on them, just reset the button.
+                    btn.disabled = false;
+                    btn.innerText = 'Login via Google';
+                    return;
+                }
+                try {
+                    await signInWithRedirect(auth, new GoogleAuthProvider());
+                    // Page will navigate away here; nothing more to do.
+                } catch (redirectErr) {
+                    showBanner("Sign-in failed: " + redirectErr.message);
+                    btn.disabled = false;
+                    btn.innerText = 'Login via Google';
+                }
+            }
+        }
+        document.getElementById('btn-login').addEventListener('click', doLogin);
+
+        // Complete a signInWithRedirect() flow if we just came back from one.
+        getRedirectResult(auth).catch(err => {
+            if (err && err.code && err.code !== 'auth/no-auth-event') {
+                showBanner("Sign-in failed: " + err.message);
             }
         });
         document.getElementById('btn-logout').addEventListener('click', async () => {
