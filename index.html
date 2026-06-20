@@ -248,13 +248,11 @@
 
         const rtcConfig = { iceServers: [ { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' } ] };
 
-        // IMPORTS (Downgraded from hallucinated 12.15.0 to stable v11.6.1)
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
         import { getAuth, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, addDoc, updateDoc, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // INIT SERVICES
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
@@ -262,7 +260,6 @@
         let analytics = null;
         try { analytics = getAnalytics(app); } catch (e) { console.warn("Analytics blocked."); }
 
-        // GLOBAL STATE
         let currentUser = null;
         let dbBasePath = ''; 
         
@@ -533,7 +530,19 @@
             const btn = document.getElementById('btn-start-camera');
             btn.disabled = true;
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
+                // BUGFIX: Device constraints fallback. Testing on a laptop with only a default webcam
+                // will instantly crash if `facingMode: 'environment'` is strictly requested.
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
+                } catch (camErr) {
+                    if (camErr.name === 'OverconstrainedError' || camErr.name === 'ConstraintNotSatisfiedError') {
+                        console.warn("Rear camera not found, falling back to any available camera.");
+                        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                    } else {
+                        throw camErr;
+                    }
+                }
+                
                 document.getElementById('local-video').srcObject = localStream;
                 document.getElementById('my-device-id-display').innerText = `ID: ${myDeviceId}`;
                 showScreen('screen-3-camera');
@@ -576,7 +585,6 @@
                 viewerConnections[connId] = pc;
                 updateCameraDashboardUI();
 
-                // BUGFIX: Accumulate tracks to prevent MediaStream overwriting on separated tracks
                 pc.ontrack = e => {
                     if (e.track.kind === 'audio') {
                         let remoteAudio = document.getElementById(`audio_${connId}`);
@@ -708,7 +716,6 @@
                 tile = document.createElement('div');
                 tile.id = `tile-${camId}`; tile.className = 'camera-tile';
                 tile.dataset.connState = 'idle'; 
-                // BUGFIX: Added muted to the video element to satisfy autoplay policies natively
                 tile.innerHTML = `
                     <div class="tile-overlay">
                         <div style="font-weight:bold; letter-spacing:1px;" class="cam-label"></div>
@@ -831,7 +838,6 @@
                 pc.addTransceiver('video', { direction: 'recvonly' });
                 const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
 
-                // BUGFIX: Prevent MediaStream overwrite if tracks arrive detached without streams.
                 pc.ontrack = e => {
                     if (e.streams && e.streams[0]) {
                         if (videoElem.srcObject !== e.streams[0]) videoElem.srcObject = e.streams[0];
@@ -881,7 +887,6 @@
                     }
                 };
 
-                // Default setup matches the muted attribute
                 videoElem.muted = true;
                 muteBtn.innerText = '[UNMUTE]';
                 muteBtn.classList.add('danger');
@@ -906,10 +911,9 @@
                 talkBtn.onmousedown = startTalking; talkBtn.onmouseup = stopTalking; talkBtn.onmouseleave = stopTalking;
                 talkBtn.ontouchstart = startTalking; talkBtn.ontouchend = stopTalking;
 
-                // BUGFIX: Robust connection state checking (handles ICE and Peer states)
                 const checkReady = () => {
                     if (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected') {
-                        if (tile.dataset.connState === 'live') return; // already handled
+                        if (tile.dataset.connState === 'live') return; 
                         clearTimeout(negotiationTimeout);
                         tile.dataset.connState = 'live';
                         indicator.className = 'indicator live'; statusText.innerText = 'LIVE'; placeholder.style.display = 'none';
@@ -946,15 +950,41 @@
                 const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
                 await setDoc(doc(db, `${dbBasePath}/sessions/${camId}/offers/${connId}`), { type: offer.type, sdp: offer.sdp });
 
-                const unsubAns = onSnapshot(collection(db, `${dbBasePath}/sessions/${camId}/answers`), snap => {
-                    snap.docChanges().forEach(change => { if (change.doc.id === connId && change.type === 'added') pc.setRemoteDescription(new RTCSessionDescription(change.doc.data())).catch(()=>{}); });
+                // BUGFIX: ICE Signaling Race Condition
+                // We must queue incoming ICE candidates until the remote description (Answer) is officially set.
+                let remoteDescSet = false;
+                let iceCandidateQueue = [];
+
+                const unsubAns = onSnapshot(collection(db, `${dbBasePath}/sessions/${camId}/answers`), async snap => {
+                    for (const change of snap.docChanges()) {
+                        if (change.doc.id === connId && change.type === 'added') {
+                            try {
+                                await pc.setRemoteDescription(new RTCSessionDescription(change.doc.data()));
+                                remoteDescSet = true;
+                                while(iceCandidateQueue.length > 0) {
+                                    const candidate = iceCandidateQueue.shift();
+                                    pc.addIceCandidate(candidate).catch(e => console.warn('Queued ICE failed:', e));
+                                }
+                            } catch (e) { console.error('Failed to set remote description:', e); }
+                        }
+                    }
                 }, err => console.warn('answer listener error', err));
                 unsubs.push(unsubAns);
 
                 const unsubIce = onSnapshot(collection(db, `${dbBasePath}/sessions/${camId}/iceCandidates_camera_${connId}`), snap => {
-                    snap.docChanges().forEach(change => { if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{}); });
+                    snap.docChanges().forEach(change => {
+                        if (change.type === 'added') {
+                            const candidate = new RTCIceCandidate(change.doc.data());
+                            if (remoteDescSet) {
+                                pc.addIceCandidate(candidate).catch(e => console.warn('ICE failed:', e));
+                            } else {
+                                iceCandidateQueue.push(candidate);
+                            }
+                        }
+                    });
                 }, err => console.warn('ice listener error', err));
                 unsubs.push(unsubIce);
+
             } catch (err) {
                 clearTimeout(negotiationTimeout);
                 tile.dataset.connState = 'idle';
