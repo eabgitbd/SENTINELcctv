@@ -248,18 +248,17 @@
 
         const rtcConfig = { iceServers: [ { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' } ] };
 
-        // IMPORTS (Firebase v12.15.0)
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
-        import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-analytics.js";
-        import { getAuth, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
-        import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, addDoc, updateDoc, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+        // IMPORTS (Downgraded from hallucinated 12.15.0 to stable v11.6.1)
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
+        import { getAuth, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, addDoc, updateDoc, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // INIT SERVICES
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
         
-        // Safety wrap analytics to prevent Ad-blocker crashes
         let analytics = null;
         try { analytics = getAnalytics(app); } catch (e) { console.warn("Analytics blocked."); }
 
@@ -277,18 +276,13 @@
         let localStream = null;
         let cameraUnsubscribes = [];
         let viewerConnections = {}; 
-        let viewerUnsubMap = {}; // BUGFIX: track per-viewer unsubscribes so they can be cleaned up individually
+        let viewerUnsubMap = {};
 
         let dashboardUnsubscribe = null;
         let activeViewerPCs = {}; 
         let wakeLock = null;
 
         // ---- SAFETY HELPERS ----
-        // BUGFIX: centralizes "run this, never let it throw" so cleanup functions
-        // (stopCamera/stopViewer) can never be aborted mid-way by a single failing
-        // unsubscribe/close call. This was the root cause of "Back to Home" appearing
-        // to do nothing: an uncaught exception from a snapshot unsubscribe or an
-        // already-closed RTCPeerConnection would stop execution before showScreen() ran.
         function safeRun(fn, label) {
             try { 
                 const result = fn();
@@ -336,17 +330,6 @@
             showBanner._t = setTimeout(() => { b.style.display = 'none'; }, 4000);
         }
 
-        // BUGFIX: a direct, early test of whether this account can actually read and
-        // write its own Firestore data. If your security rules in the Firebase console
-        // don't have something like:
-        //   match /users/{userId}/{document=**} {
-        //     allow read, write: if request.auth != null && request.auth.uid == userId;
-        //   }
-        // then EVERY camera/viewer write and read in this app is silently rejected,
-        // and no amount of WebRTC/TURN fixing will ever make the dashboard show
-        // anything. This runs once per login and tells you immediately, in plain
-        // language, instead of you discovering it three layers deep in a stalled
-        // video connection.
         async function probeFirestoreAccess(uid) {
             const probePath = `users/${uid}/_diagnostics`;
             try {
@@ -367,16 +350,13 @@
         onAuthStateChanged(auth, user => {
             currentUser = user;
             if (user) {
-                dbBasePath = `users/${user.uid}`; // CLEAN PATH FOR PROJECT FIRESTORE
+                dbBasePath = `users/${user.uid}`; 
                 document.getElementById('user-info').innerText = user.displayName || user.email || `Agent ${user.uid.substr(0,5)}`;
                 const avatar = document.getElementById('user-avatar');
                 if (user.photoURL) { avatar.src = user.photoURL; avatar.style.display = 'block'; }
                 else { avatar.style.display = 'none'; }
                 document.getElementById('btn-logout').style.display = 'block';
 
-                // BUGFIX: surface the account identity so a mismatch between two
-                // devices (the original root cause of cameras being invisible on the
-                // dashboard) is visible at a glance instead of failing silently.
                 const uidTag = document.getElementById('user-uid-tag');
                 uidTag.innerText = 'ID: ' + user.uid.substring(0, 8);
                 uidTag.style.display = 'inline-block';
@@ -390,14 +370,6 @@
                 }
 
                 showScreen('screen-2-mode');
-
-                // BUGFIX: actively probe Firestore read+write permissions right after
-                // login instead of letting a rules problem surface only as a confusing
-                // mid-connection failure later. Default Firestore security rules deny
-                // all access — if this project's rules don't explicitly allow
-                // request.auth.uid == userId on users/{userId}/**, EVERY write/read in
-                // this app fails silently, which looks exactly like "dashboard shows
-                // nothing" no matter how correct the WebRTC code is.
                 probeFirestoreAccess(user.uid);
             } else {
                 document.getElementById('user-info').innerText = 'Awaiting Auth...';
@@ -408,41 +380,21 @@
             }
         });
 
-        // BUGFIX (root cause of "dashboard shows nothing from another device"):
-        // The old code fell back to signInAnonymously() whenever the popup failed —
-        // which happens routinely on phones (in-app browsers, iOS Safari storage
-        // partitioning, popup blockers). Anonymous sign-in mints a brand-new random
-        // uid every time, completely unrelated to the real Google account. Since all
-        // Firestore data lives under `users/${uid}/...`, a camera phone that silently
-        // fell back to anonymous auth was writing to a totally different, invisible
-        // path than the viewer's account — so the camera could never appear on the
-        // dashboard. This had nothing to do with "Google activity interference"; it
-        // was two devices ending up authenticated as two different identities with
-        // zero indication that had happened.
-        //
-        // Fix: try popup first (best UX on desktop), and if it fails for any reason
-        // OTHER than the user deliberately closing it, fall back to a full-page
-        // redirect — which works reliably even in restrictive mobile/in-app browser
-        // contexts — instead of silently downgrading to an anonymous, disconnected
-        // identity. No more silent anonymous fallback, anywhere.
         async function doLogin() {
             const btn = document.getElementById('btn-login');
             btn.disabled = true;
             btn.innerText = 'Connecting...';
             try {
                 await signInWithPopup(auth, new GoogleAuthProvider());
-                // onAuthStateChanged will handle navigation
             } catch (err) {
                 console.warn("Popup sign-in failed, falling back to redirect:", err.code);
                 if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
-                    // User deliberately closed it — don't force a redirect on them, just reset the button.
                     btn.disabled = false;
                     btn.innerText = 'Login via Google';
                     return;
                 }
                 try {
                     await signInWithRedirect(auth, new GoogleAuthProvider());
-                    // Page will navigate away here; nothing more to do.
                 } catch (redirectErr) {
                     showBanner("Sign-in failed: " + redirectErr.message);
                     btn.disabled = false;
@@ -452,7 +404,6 @@
         }
         document.getElementById('btn-login').addEventListener('click', doLogin);
 
-        // Complete a signInWithRedirect() flow if we just came back from one.
         getRedirectResult(auth).catch(err => {
             if (err && err.code && err.code !== 'auth/no-auth-event') {
                 showBanner("Sign-in failed: " + err.message);
@@ -470,7 +421,6 @@
         document.getElementById('btn-rerun-diagnostics').addEventListener('click', runDiagnostics);
 
         function diagRow(label, status, detail) {
-            // status: 'pass' | 'fail' | 'pending'
             const cls = status === 'pass' ? 'diag-pass' : status === 'fail' ? 'diag-fail' : 'diag-pending';
             const symbol = status === 'pass' ? '✓' : status === 'fail' ? '✗' : '…';
             return `<div class="diag-row">
@@ -479,10 +429,6 @@
             </div>`;
         }
 
-        // BUGFIX / DIAGNOSTIC TOOL: a single, visible, step-by-step health check that
-        // tests every layer this app depends on, in order, so a failure is pinpointed
-        // instead of guessed at. Run this on BOTH the camera and viewer device and
-        // compare results — that comparison is the fastest way to find a mismatch.
         async function runDiagnostics() {
             const out = document.getElementById('diag-results');
             const results = [];
@@ -498,22 +444,18 @@
             results.push({ label: 'ICE candidate gathering (STUN)', status: 'pending' });
             render();
 
-            // 1. WebRTC support
             const hasRTC = typeof RTCPeerConnection !== 'undefined';
             results[0] = { label: 'Browser WebRTC support', status: hasRTC ? 'pass' : 'fail', detail: hasRTC ? navigator.userAgent.substring(0, 60) : 'This browser has no WebRTC support at all.' };
             render();
 
-            // 2. Auth
             if (!currentUser) {
                 results[1] = { label: 'Signed in', status: 'fail', detail: 'Not logged in.' };
-                render();
-                return;
+                render(); return;
             }
             results[1] = { label: 'Signed in', status: 'pass', detail: currentUser.isAnonymous ? 'ANONYMOUS — this is almost certainly your problem, see below' : (currentUser.email || currentUser.displayName || 'Google account') };
             results[2] = { label: 'Account ID', status: currentUser.isAnonymous ? 'fail' : 'pass', detail: currentUser.uid };
             render();
 
-            // 3. Firestore write
             const probeDoc = doc(db, `${dbBasePath}/_diagnostics`, 'probe');
             try {
                 await setDoc(probeDoc, { ts: serverTimestamp(), from: myDeviceId });
@@ -521,7 +463,6 @@
             } catch (err) {
                 results[3] = { label: 'Firestore write', status: 'fail', detail: `${err.code || ''} ${err.message}` };
                 render();
-                // Can't usefully continue past this — everything downstream needs writes to work.
                 results[4] = { label: 'Firestore read', status: 'fail', detail: 'Skipped — write already failed' };
                 results[5] = { label: 'Camera collection visible', status: 'fail', detail: 'Skipped — write already failed' };
                 render();
@@ -534,7 +475,6 @@
             }
             render();
 
-            // 4. Firestore read
             try {
                 const snap = await getDocs(collection(db, `${dbBasePath}/_diagnostics`));
                 results[4] = { label: 'Firestore read', status: 'pass', detail: `${snap.size} doc(s) found` };
@@ -543,7 +483,6 @@
             }
             render();
 
-            // 5. Can this account see the cameras collection (what the dashboard actually queries)
             try {
                 const camSnap = await getDocs(collection(db, `${dbBasePath}/cameras`));
                 const camList = camSnap.docs.map(d => `${d.id} (${d.data().label || 'no label'})`).join(', ') || 'none registered right now';
@@ -553,7 +492,6 @@
             }
             render();
 
-            // 6. Camera/mic permission (only tests, doesn't keep the stream open)
             try {
                 const testStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
                 testStream.getTracks().forEach(t => t.stop());
@@ -563,8 +501,6 @@
             }
             render();
 
-            // 7. Can we actually gather ICE candidates at all (proves STUN reachability,
-            // i.e. that this network even allows the UDP traffic WebRTC needs)
             try {
                 const candidateCount = await new Promise((resolve, reject) => {
                     const testPc = new RTCPeerConnection(rtcConfig);
@@ -586,7 +522,7 @@
 
         // CAMERA MODE
         document.getElementById('btn-start-camera').addEventListener('click', startCamera);
-        document.getElementById('btn-camera-home').addEventListener('click', () => { stopCamera(); }); // BUGFIX: wrap so stopCamera's own internal errors (now safeRun-guarded) never block this handler
+        document.getElementById('btn-camera-home').addEventListener('click', () => { stopCamera(); }); 
         
         document.getElementById('cam-label-input').addEventListener('change', async (e) => {
             if (!currentUser || !localStream) return;
@@ -603,8 +539,6 @@
                 showScreen('screen-3-camera');
                 await requestWakeLock();
 
-                // BUGFIX: clear any stale signaling docs from a previous session before
-                // announcing the camera as live, so leftover offers don't get re-processed.
                 await safeDeleteCollection(`${dbBasePath}/sessions/${myDeviceId}/offers`);
                 await safeDeleteCollection(`${dbBasePath}/sessions/${myDeviceId}/answers`);
 
@@ -620,10 +554,6 @@
                 
                 cameraUnsubscribes.push(unsubOffers);
             } catch (err) {
-                // BUGFIX: this used to always say "Camera permission denied" no matter
-                // what actually failed — including Firestore permission errors, network
-                // failures, or anything else thrown inside this block. That hid the real
-                // cause from you. Now it shows the actual browser/Firebase error.
                 console.error('startCamera failed:', err);
                 if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
                     showBanner("Camera/mic permission denied by browser.");
@@ -646,6 +576,7 @@
                 viewerConnections[connId] = pc;
                 updateCameraDashboardUI();
 
+                // BUGFIX: Accumulate tracks to prevent MediaStream overwriting on separated tracks
                 pc.ontrack = e => {
                     if (e.track.kind === 'audio') {
                         let remoteAudio = document.getElementById(`audio_${connId}`);
@@ -654,9 +585,14 @@
                             remoteAudio.id = `audio_${connId}`; remoteAudio.autoplay = true;
                             document.body.appendChild(remoteAudio);
                         }
-                        // Robust Stream attachment
-                        if (e.streams && e.streams[0]) { remoteAudio.srcObject = e.streams[0]; } 
-                        else { let ms = new MediaStream(); ms.addTrack(e.track); remoteAudio.srcObject = ms; }
+                        if (e.streams && e.streams[0]) {
+                            remoteAudio.srcObject = e.streams[0];
+                        } else {
+                            let ms = remoteAudio.srcObject;
+                            if (!ms) { ms = new MediaStream(); remoteAudio.srcObject = ms; }
+                            ms.addTrack(e.track);
+                        }
+                        remoteAudio.play().catch(()=>{});
                     }
                 };
 
@@ -671,8 +607,6 @@
                     if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
                         delete viewerConnections[connId]; updateCameraDashboardUI();
                         const audioEl = document.getElementById(`audio_${connId}`); if(audioEl) audioEl.remove();
-                        // BUGFIX: clean up this viewer's dedicated ICE listener instead of
-                        // letting it accumulate forever in cameraUnsubscribes.
                         if (viewerUnsubMap[connId]) { safeRun(viewerUnsubMap[connId], `ice-unsub-${connId}`); delete viewerUnsubMap[connId]; }
                     }
                 };
@@ -688,15 +622,9 @@
                         if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(err => console.warn('addIceCandidate (camera) failed:', err));
                     });
                 }, err => showBanner("ICE listener error (camera): " + err.message));
-                viewerUnsubMap[connId] = unsubIce; // BUGFIX: tracked per-connection now
+                viewerUnsubMap[connId] = unsubIce; 
                 cameraUnsubscribes.push(unsubIce);
             } catch(e) {
-                // BUGFIX: this previously only logged to console.error, completely
-                // invisible to the person standing at the camera. If setDoc/onSnapshot
-                // failed here — most commonly a Firestore security-rules denial on the
-                // sessions/{camId}/answers or iceCandidates_* subcollections — the
-                // camera would silently never answer, and the viewer would just hang
-                // on "NEGOTIATING..." with no clue why. Now it's a visible banner.
                 console.error("Error setting up viewer connection", e);
                 if (e.code === 'permission-denied') {
                     showBanner("Can't answer viewer — Firestore rules deny writes to /sessions. Check your security rules.");
@@ -720,11 +648,6 @@
         }
 
         async function stopCamera() {
-            // BUGFIX: every cleanup step is now isolated with safeRun/try-catch so a
-            // single failure (closing an already-closed RTCPeerConnection, an
-            // unsubscribe throwing, a denied/offline deleteDoc) can no longer abort
-            // the function before showScreen() runs. This was why "BACK TO HOME"
-            // sometimes appeared completely unresponsive.
             if (localStream) {
                 safeRun(() => localStream.getTracks().forEach(t => t.stop()), 'stop-tracks');
                 localStream = null;
@@ -738,7 +661,6 @@
             viewerConnections = {};
             updateCameraDashboardUI();
 
-            // Remove any leftover remote-audio elements from viewers
             document.querySelectorAll('audio[id^="audio_"]').forEach(el => safeRun(() => el.remove(), 'audio-remove'));
 
             if (currentUser && dbBasePath) {
@@ -747,7 +669,6 @@
                 safeRun(() => safeDeleteCollection(`${dbBasePath}/sessions/${myDeviceId}/answers`), 'cleanup-answers');
             }
 
-            // Always navigate home and release the wake lock, no matter what happened above.
             showScreen('screen-2-mode');
             safeRun(() => releaseWakeLock(), 'release-wakelock');
         }
@@ -755,7 +676,7 @@
 
         // VIEWER MODE
         document.getElementById('btn-start-viewer').addEventListener('click', startViewer);
-        document.getElementById('btn-viewer-home').addEventListener('click', () => { stopViewer(); }); // BUGFIX: same isolation pattern as camera-home
+        document.getElementById('btn-viewer-home').addEventListener('click', () => { stopViewer(); });
 
         function startViewer() {
             showScreen('screen-4-viewer');
@@ -763,18 +684,6 @@
             document.getElementById('camera-grid').innerHTML = '';
             document.getElementById('no-cameras-msg').style.display = 'none';
 
-            // Listen for all cameras on the user's account
-            // BUGFIX: the previous version only handled docChanges() of type
-            // 'added'/'modified'/'removed' relative to changes since listener attach,
-            // which is correct for live updates BUT the very first snapshot fires
-            // 'added' for every existing camera anyway, so that part was fine.
-            // The actual issue was that `renderCameraTile` could mark an existing,
-            // currently-connecting/live tile back to 'AVAILABLE'/offline state
-            // whenever Firestore re-delivered a snapshot (e.g. on reconnect or
-            // metadata-only change), because the guard only checked the indicator's
-            // current CSS class string instead of tracking real connection state.
-            // Tracking state explicitly per tile fixes both the flicker and the
-            // "connect does nothing" symptom.
             dashboardUnsubscribe = onSnapshot(collection(db, `${dbBasePath}/cameras`), snap => {
                 snap.docChanges().forEach(change => {
                     const camId = change.doc.id;
@@ -798,7 +707,8 @@
             if (!tile) {
                 tile = document.createElement('div');
                 tile.id = `tile-${camId}`; tile.className = 'camera-tile';
-                tile.dataset.connState = 'idle'; // BUGFIX: explicit connection-state tracker, independent of CSS classes
+                tile.dataset.connState = 'idle'; 
+                // BUGFIX: Added muted to the video element to satisfy autoplay policies natively
                 tile.innerHTML = `
                     <div class="tile-overlay">
                         <div style="font-weight:bold; letter-spacing:1px;" class="cam-label"></div>
@@ -809,14 +719,14 @@
                         <span class="last-seen"></span>
                         <button class="btn danger remove-cam-btn" style="margin-top: 15px; font-size: 0.7rem; display: none; padding: 5px 10px;">[ FORGET CAMERA ]</button>
                     </div>
-                    <video autoplay playsinline></video>
+                    <video autoplay playsinline muted></video>
                     <div class="tile-controls">
                         <button class="btn connect-btn neon" style="padding: 5px 15px; font-size: 0.8rem;">CONNECT</button>
                         <div class="action-btns">
                             <button class="btn pin-btn" title="Pin Camera">[PIN]</button>
                             <button class="btn snap-btn" title="Take Screenshot">[SNAP]</button>
                             <button class="btn rec-btn" title="Record Video">[REC]</button>
-                            <button class="btn mute-btn" title="Toggle Mute">[MUTE]</button>
+                            <button class="btn mute-btn" title="Toggle Audio">[UNMUTE]</button>
                             <button class="btn talk-btn" title="Hold to Speak">[TALK]</button>
                             <button class="btn fullscreen-btn" title="Fullscreen">[FULL]</button>
                         </div>
@@ -849,9 +759,6 @@
             
             if (data && data.label) labelEl.innerText = data.label;
 
-            // BUGFIX: use the explicit dataset.connState tracker instead of sniffing
-            // CSS class strings, so an "available"/"modified" snapshot event can never
-            // stomp on a tile that is mid-negotiation or already live.
             const connState = tile.dataset.connState;
 
             if (state === 'offline') {
@@ -871,14 +778,9 @@
                 placeholder.querySelector('.last-seen').innerText = ''; placeholder.querySelector('.remove-cam-btn').style.display = 'none';
                 connectBtn.style.display = 'block'; connectBtn.disabled = false; connectBtn.innerText = 'CONNECT';
             }
-            // If connState is 'connecting' or 'live', an 'available'/'modified' event
-            // is intentionally ignored here — the live connection's own state machine
-            // (in connectToCamera) owns the UI from this point on.
         }
 
         function disconnectTile(camId) {
-            // BUGFIX: helper to tear down any active viewer connection tied to a tile,
-            // e.g. when the camera goes offline or is removed while we're watching it.
             const entry = Object.entries(activeViewerPCs).find(([, v]) => v.camId === camId);
             if (entry) {
                 const [connId, conn] = entry;
@@ -905,10 +807,7 @@
             const spinner = document.createElement('div'); spinner.className = 'spinner';
             placeholder.querySelector('.placeholder-msg').appendChild(spinner);
             placeholder.querySelector('.placeholder-msg').appendChild(document.createTextNode('CONNECTING'));
-            // BUGFIX: live diagnostic line so a stalled connection shows *what* is
-            // stuck (gathering ICE candidates? waiting on the camera? failed?) instead
-            // of an opaque spinner that looks identical whether it's about to succeed
-            // or never will.
+            
             const diagLine = document.createElement('div');
             diagLine.style.cssText = 'font-size:0.7rem; color:#666; margin-top:6px; text-align:center; max-width:90%;';
             diagLine.innerText = 'Initializing...';
@@ -916,14 +815,9 @@
             placeholder.querySelector('.last-seen').innerText = '';
             placeholder.querySelector('.remove-cam-btn').style.display = 'none';
 
-            // BUGFIX: a hard timeout so a stalled WebRTC negotiation (e.g. blocked by
-            // a strict NAT/firewall with no TURN server configured — this app only
-            // ships STUN servers) doesn't leave the tile stuck on "NEGOTIATING..."
-            // forever with no feedback. This was very likely the main reason "live
-            // feed from dashboard is not working": connections can hang silently.
             const negotiationTimeout = setTimeout(() => {
                 if (tile.dataset.connState === 'connecting') {
-                    showBanner(`Connection to ${camId} timed out (last state: ${diagLine.innerText}). Without a TURN server, this fails whenever either device is behind certain NATs/firewalls — try both devices on the same Wi-Fi network to confirm signaling itself works.`);
+                    showBanner(`Connection to ${camId} timed out (last state: ${diagLine.innerText}). Without a TURN server, this fails whenever either device is behind certain NATs/firewalls.`);
                     disconnectTile(camId);
                     renderCameraTile(camId, { label: tile.querySelector('.cam-label').innerText }, 'available');
                 }
@@ -937,17 +831,19 @@
                 pc.addTransceiver('video', { direction: 'recvonly' });
                 const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
 
-                // Robust Stream attachment (Fixes blank videos on some browsers)
+                // BUGFIX: Prevent MediaStream overwrite if tracks arrive detached without streams.
                 pc.ontrack = e => {
                     if (e.streams && e.streams[0]) {
                         if (videoElem.srcObject !== e.streams[0]) videoElem.srcObject = e.streams[0];
                     } else {
-                        let ms = new MediaStream(); ms.addTrack(e.track); videoElem.srcObject = ms;
+                        let ms = videoElem.srcObject;
+                        if (!ms) {
+                            ms = new MediaStream();
+                            videoElem.srcObject = ms;
+                        }
+                        ms.addTrack(e.track);
                     }
-                    // BUGFIX: some browsers attach the track but never fire 'loadedmetadata'
-                    // until play() is explicitly (re)triggered, leaving a black/frozen tile
-                    // even though connectionState reports 'connected'.
-                    videoElem.play().catch(() => {});
+                    videoElem.play().catch(err => console.warn('Autoplay blocked:', err));
                 };
 
                 const pinBtn = tile.querySelector('.pin-btn');
@@ -985,7 +881,15 @@
                     }
                 };
 
-                muteBtn.onclick = () => { videoElem.muted = !videoElem.muted; muteBtn.innerText = videoElem.muted ? '[UNMUTE]' : '[MUTE]'; muteBtn.classList.toggle('danger', videoElem.muted); };
+                // Default setup matches the muted attribute
+                videoElem.muted = true;
+                muteBtn.innerText = '[UNMUTE]';
+                muteBtn.classList.add('danger');
+                muteBtn.onclick = () => { 
+                    videoElem.muted = !videoElem.muted; 
+                    muteBtn.innerText = videoElem.muted ? '[UNMUTE]' : '[MUTE]'; 
+                    muteBtn.classList.toggle('danger', videoElem.muted); 
+                };
 
                 let localMicStream = null; let isTalking = false;
                 const startTalking = async (e) => {
@@ -1002,28 +906,38 @@
                 talkBtn.onmousedown = startTalking; talkBtn.onmouseup = stopTalking; talkBtn.onmouseleave = stopTalking;
                 talkBtn.ontouchstart = startTalking; talkBtn.ontouchend = stopTalking;
 
-                pc.onconnectionstatechange = () => {
-                    diagLine.innerText = `connection: ${pc.connectionState}`;
-                    if (pc.connectionState === 'connected') {
+                // BUGFIX: Robust connection state checking (handles ICE and Peer states)
+                const checkReady = () => {
+                    if (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected') {
+                        if (tile.dataset.connState === 'live') return; // already handled
                         clearTimeout(negotiationTimeout);
                         tile.dataset.connState = 'live';
                         indicator.className = 'indicator live'; statusText.innerText = 'LIVE'; placeholder.style.display = 'none';
                         btn.style.display = 'none'; actionBtns.style.display = 'flex'; tile.classList.add('pulse');
-                    } else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
-                        clearTimeout(negotiationTimeout);
-                        tile.dataset.connState = 'idle';
-                        renderCameraTile(camId, { label: tile.querySelector('.cam-label').innerText }, 'available');
-                        actionBtns.style.display = 'none';
-                        unsubs.forEach(fn => safeRun(fn, `viewer-unsub-${connId}`)); delete activeViewerPCs[connId];
-                        if (pc.connectionState === 'failed') showBanner(`Lost connection to ${camId} (ICE failed — likely a NAT/firewall issue without a TURN server).`);
                     }
                 };
-                // BUGFIX: these two events fire well before connectionState settles,
-                // and are the actual diagnostic signal for "why is this stuck" — e.g.
-                // iceConnectionState staying at 'checking' forever means candidates
-                // were exchanged but no path between the peers actually works (the
-                // classic symptom of needing a TURN server).
-                pc.oniceconnectionstatechange = () => { diagLine.innerText = `ice: ${pc.iceConnectionState}`; };
+                
+                const handleDisconnect = () => {
+                    if (tile.dataset.connState === 'idle') return;
+                    clearTimeout(negotiationTimeout);
+                    tile.dataset.connState = 'idle';
+                    renderCameraTile(camId, { label: tile.querySelector('.cam-label').innerText }, 'available');
+                    actionBtns.style.display = 'none';
+                    unsubs.forEach(fn => safeRun(fn, `viewer-unsub-${connId}`)); delete activeViewerPCs[connId];
+                    if (pc.connectionState === 'failed' || pc.iceConnectionState === 'failed') showBanner(`Lost connection to ${camId}`);
+                };
+
+                pc.onconnectionstatechange = () => {
+                    diagLine.innerText = `connection: ${pc.connectionState}`;
+                    checkReady();
+                    if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) handleDisconnect();
+                };
+                pc.oniceconnectionstatechange = () => { 
+                    diagLine.innerText = `ice: ${pc.iceConnectionState}`; 
+                    checkReady();
+                    if (['disconnected', 'failed', 'closed'].includes(pc.iceConnectionState)) handleDisconnect();
+                };
+                
                 pc.onicegatheringstatechange = () => { if (pc.iceConnectionState !== 'connected') diagLine.innerText = `gathering: ${pc.iceGatheringState}`; };
                 pc.onsignalingstatechange = () => { console.log(`[${camId}] signaling: ${pc.signalingState}`); };
 
@@ -1050,8 +964,6 @@
         }
 
         function stopViewer() {
-            // BUGFIX: same isolation pattern as stopCamera — every step wrapped so a
-            // single throw can't block navigation back to the home screen.
             if (typeof dashboardUnsubscribe === 'function') safeRun(dashboardUnsubscribe, 'dashboard-unsub');
             dashboardUnsubscribe = null;
 
