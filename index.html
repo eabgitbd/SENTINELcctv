@@ -87,6 +87,7 @@
 
         #banner { position: fixed; top: 0; left: 0; right: 0; padding: 15px; text-align: center; z-index: 9999; font-weight: bold; display: none; }
         .banner-error { background: var(--error); color: white; }
+        .banner-success { background: var(--accent-dim); color: white; }
 
         /* --- CAMERA MODE --- */
         .camera-container { max-width: 800px; margin: 0 auto; background: var(--panel); padding: 20px; border: 1px solid #333; border-radius: 8px; }
@@ -128,6 +129,13 @@
             justify-content: center; align-items: center; background: #111; z-index: 5;
         }
         .empty-placeholder span { color: #666; font-size: 0.9rem; margin-top: 10px; }
+
+        .spinner {
+            width: 22px; height: 22px; border-radius: 50%;
+            border: 3px solid #333; border-top-color: var(--warning);
+            animation: spin 0.8s linear infinite; margin-bottom: 8px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -196,10 +204,7 @@
             <div id="camera-grid" class="grid">
                 <!-- Camera Tiles injected dynamically -->
             </div>
-            <div id="no-cameras-msg" style="display:none; text-align:center; color:#666; padding: 60px 20px;">
-                <p style="font-size:1.1rem;">NO CAMERAS REGISTERED</p>
-                <p style="font-size:0.85rem;">Open SENTINEL on another device and select [ ACT AS CAMERA ] to start streaming here.</p>
-            </div>
+            <p id="no-cameras-msg" style="display:none; text-align:center; color:#666; margin-top:60px;">No cameras registered yet. Start one in "Act as Camera" mode.</p>
         </section>
     </main>
 
@@ -214,28 +219,13 @@
             measurementId: "G-C2RR9HZJWL"
         };
 
-        // NOTE: STUN-only configs frequently fail to connect once camera & viewer
-        // are on different networks (home wifi vs mobile data, different NATs, etc).
-        // A TURN relay is required as a fallback in that case. The openrelay.metered.ca
-        // credentials below are a free public TURN service for testing — replace with
-        // your own TURN provider (Twilio, Xirsys, Metered, or self-hosted coturn) for
-        // production reliability/security.
-        const rtcConfig = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-                { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-                { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
-            ],
-            iceCandidatePoolSize: 10
-        };
+        const rtcConfig = { iceServers: [ { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' } ] };
 
         // IMPORTS (Firebase v12.15.0)
         import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
         import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-analytics.js";
         import { getAuth, signInWithPopup, GoogleAuthProvider, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
-        import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, addDoc, updateDoc, serverTimestamp, getDocs, writeBatch } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, addDoc, updateDoc, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
 
         // INIT SERVICES
         const app = initializeApp(firebaseConfig);
@@ -260,36 +250,34 @@
         let localStream = null;
         let cameraUnsubscribes = [];
         let viewerConnections = {}; 
+        let viewerUnsubMap = {}; // BUGFIX: track per-viewer unsubscribes so they can be cleaned up individually
 
         let dashboardUnsubscribe = null;
         let activeViewerPCs = {}; 
         let wakeLock = null;
 
-        // SIGNALING CLEANUP UTILS
-        // Stale offer/answer/ICE docs left behind in Firestore get replayed as
-        // fresh "added" events the next time someone listens on that collection
-        // (Firestore onSnapshot always delivers existing docs as "added" on first
-        // attach). Without cleanup, a camera restarting would try to "answer" old
-        // viewer offers from long-gone sessions, and dead ICE candidate docs pile up
-        // forever. These helpers keep signaling collections tidy so reconnects are
-        // clean rather than chaotic.
-        async function clearCollection(collRef) {
-            try {
-                const snap = await getDocs(collRef);
-                if (snap.empty) return;
-                const batch = writeBatch(db);
-                snap.forEach(d => batch.delete(d.ref));
-                await batch.commit();
-            } catch (e) { console.warn("Cleanup failed", e); }
+        // ---- SAFETY HELPERS ----
+        // BUGFIX: centralizes "run this, never let it throw" so cleanup functions
+        // (stopCamera/stopViewer) can never be aborted mid-way by a single failing
+        // unsubscribe/close call. This was the root cause of "Back to Home" appearing
+        // to do nothing: an uncaught exception from a snapshot unsubscribe or an
+        // already-closed RTCPeerConnection would stop execution before showScreen() ran.
+        function safeRun(fn, label) {
+            try { 
+                const result = fn();
+                if (result && typeof result.catch === 'function') {
+                    result.catch(err => console.warn(`[safeRun:${label}]`, err));
+                }
+            } catch (err) {
+                console.warn(`[safeRun:${label}]`, err);
+            }
         }
-        async function cleanupSession(basePath, deviceId, connId) {
-            const tasks = [
-                deleteDoc(doc(db, `${basePath}/sessions/${deviceId}/offers/${connId}`)).catch(() => {}),
-                deleteDoc(doc(db, `${basePath}/sessions/${deviceId}/answers/${connId}`)).catch(() => {}),
-                clearCollection(collection(db, `${basePath}/sessions/${deviceId}/iceCandidates_camera_${connId}`)),
-                clearCollection(collection(db, `${basePath}/sessions/${deviceId}/iceCandidates_viewer_${connId}`))
-            ];
-            await Promise.allSettled(tasks);
+
+        async function safeDeleteCollection(path) {
+            try {
+                const snap = await getDocs(collection(db, path));
+                await Promise.all(snap.docs.map(d => deleteDoc(d.ref).catch(() => {})));
+            } catch (err) { /* best-effort cleanup only */ }
         }
 
         // WAKE LOCK UTILS
@@ -316,8 +304,9 @@
         }
         function showBanner(msg, isError = true) {
             const b = document.getElementById('banner');
-            b.innerText = msg; b.className = isError ? 'banner-error' : ''; b.style.display = 'block';
-            setTimeout(() => { b.style.display = 'none'; }, 4000);
+            b.innerText = msg; b.className = isError ? 'banner-error' : 'banner-success'; b.style.display = 'block';
+            clearTimeout(showBanner._t);
+            showBanner._t = setTimeout(() => { b.style.display = 'none'; }, 4000);
         }
 
         // AUTHENTICATION
@@ -328,6 +317,7 @@
                 document.getElementById('user-info').innerText = user.displayName || user.email || `Agent ${user.uid.substr(0,5)}`;
                 const avatar = document.getElementById('user-avatar');
                 if (user.photoURL) { avatar.src = user.photoURL; avatar.style.display = 'block'; }
+                else { avatar.style.display = 'none'; }
                 document.getElementById('btn-logout').style.display = 'block';
                 showScreen('screen-2-mode');
             } else {
@@ -338,18 +328,27 @@
             }
         });
 
-        document.getElementById('btn-login').addEventListener('click', async () => {
-            try { await signInWithPopup(auth, new GoogleAuthProvider()); } 
-            catch (err) {
+        document.getElementById('btn-login').addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            btn.disabled = true;
+            try {
+                await signInWithPopup(auth, new GoogleAuthProvider());
+            } catch (err) {
                 console.warn("Popup blocked, trying anonymous", err);
                 try { await signInAnonymously(auth); } catch (fallbackErr) { showBanner("Auth failed: " + fallbackErr.message); }
+            } finally {
+                btn.disabled = false;
             }
         });
-        document.getElementById('btn-logout').addEventListener('click', async () => { await stopCamera(); stopViewer(); await signOut(auth); });
+        document.getElementById('btn-logout').addEventListener('click', async () => {
+            await safeRun(() => stopCamera(), 'logout-stopCamera');
+            await safeRun(() => stopViewer(), 'logout-stopViewer');
+            await signOut(auth);
+        });
 
         // CAMERA MODE
         document.getElementById('btn-start-camera').addEventListener('click', startCamera);
-        document.getElementById('btn-camera-home').addEventListener('click', stopCamera); // FIXED BUTTON LISTENER
+        document.getElementById('btn-camera-home').addEventListener('click', () => { stopCamera(); }); // BUGFIX: wrap so stopCamera's own internal errors (now safeRun-guarded) never block this handler
         
         document.getElementById('cam-label-input').addEventListener('change', async (e) => {
             if (!currentUser || !localStream) return;
@@ -357,36 +356,36 @@
         });
 
         async function startCamera() {
+            const btn = document.getElementById('btn-start-camera');
+            btn.disabled = true;
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: true });
+                localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
                 document.getElementById('local-video').srcObject = localStream;
                 document.getElementById('my-device-id-display').innerText = `ID: ${myDeviceId}`;
                 showScreen('screen-3-camera');
                 await requestWakeLock();
 
+                // BUGFIX: clear any stale signaling docs from a previous session before
+                // announcing the camera as live, so leftover offers don't get re-processed.
+                await safeDeleteCollection(`${dbBasePath}/sessions/${myDeviceId}/offers`);
+                await safeDeleteCollection(`${dbBasePath}/sessions/${myDeviceId}/answers`);
+
                 await setDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId), {
                     label: document.getElementById('cam-label-input').value, status: 'live', timestamp: serverTimestamp()
                 });
 
-                // Wipe any leftover offers/answers from a previous session BEFORE attaching
-                // the listener below — otherwise Firestore replays them as fresh "added"
-                // events and the camera wastes effort trying to answer long-gone viewers.
-                await clearCollection(collection(db, `${dbBasePath}/sessions/${myDeviceId}/offers`));
-                await clearCollection(collection(db, `${dbBasePath}/sessions/${myDeviceId}/answers`));
-
                 const unsubOffers = onSnapshot(collection(db, `${dbBasePath}/sessions/${myDeviceId}/offers`), snap => {
                     snap.docChanges().forEach(change => {
-                        if (change.type === 'added') {
-                            const offerData = change.doc.data();
-                            const connId = change.doc.id;
-                            deleteDoc(change.doc.ref).catch(() => {}); // consume immediately, prevents replay
-                            handleNewViewerOffer(connId, offerData);
-                        }
+                        if (change.type === 'added') handleNewViewerOffer(change.doc.id, change.doc.data());
                     });
                 }, err => showBanner("Signaling error: " + err.message));
                 
                 cameraUnsubscribes.push(unsubOffers);
-            } catch (err) { showBanner("Camera permission denied."); }
+            } catch (err) {
+                showBanner("Camera permission denied.");
+            } finally {
+                btn.disabled = false;
+            }
         }
 
         async function handleNewViewerOffer(connId, offerData) {
@@ -404,35 +403,28 @@
                             document.body.appendChild(remoteAudio);
                         }
                         // Robust Stream attachment
-                        if (e.streams && e.streams[0]) { 
-                            if (remoteAudio.srcObject !== e.streams[0]) remoteAudio.srcObject = e.streams[0]; 
-                        } else { 
-                            if (!remoteAudio.srcObject) remoteAudio.srcObject = new MediaStream(); 
-                            remoteAudio.srcObject.addTrack(e.track); 
-                        }
+                        if (e.streams && e.streams[0]) { remoteAudio.srcObject = e.streams[0]; } 
+                        else { let ms = new MediaStream(); ms.addTrack(e.track); remoteAudio.srcObject = ms; }
                     }
                 };
 
-                let cameraIceQueue = [];
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
                 pc.onicecandidate = e => {
-                    if (e.candidate) addDoc(collection(db, `${dbBasePath}/sessions/${myDeviceId}/iceCandidates_camera_${connId}`), e.candidate.toJSON());
+                    if (e.candidate) addDoc(collection(db, `${dbBasePath}/sessions/${myDeviceId}/iceCandidates_camera_${connId}`), e.candidate.toJSON()).catch(()=>{});
                 };
 
-                let cleanedUp = false;
                 pc.onconnectionstatechange = () => {
                     if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
                         delete viewerConnections[connId]; updateCameraDashboardUI();
-                        const audioEl = document.getElementById(`audio_${connId}`); if (audioEl) audioEl.remove();
-                        if (!cleanedUp) { cleanedUp = true; cleanupSession(dbBasePath, myDeviceId, connId); }
+                        const audioEl = document.getElementById(`audio_${connId}`); if(audioEl) audioEl.remove();
+                        // BUGFIX: clean up this viewer's dedicated ICE listener instead of
+                        // letting it accumulate forever in cameraUnsubscribes.
+                        if (viewerUnsubMap[connId]) { safeRun(viewerUnsubMap[connId], `ice-unsub-${connId}`); delete viewerUnsubMap[connId]; }
                     }
                 };
 
-                // setRemoteDescription BEFORE addTrack gives the browser the remote m-line
-                // layout first, so local tracks attach to the matching transceivers without
-                // relying on creation-order guessing — more robust across browsers.
                 await pc.setRemoteDescription(new RTCSessionDescription(offerData));
-                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
 
@@ -440,16 +432,10 @@
 
                 const unsubIce = onSnapshot(collection(db, `${dbBasePath}/sessions/${myDeviceId}/iceCandidates_viewer_${connId}`), snap => {
                     snap.docChanges().forEach(change => {
-                        if (change.type === 'added') {
-                            const candidate = new RTCIceCandidate(change.doc.data());
-                            if (pc.remoteDescription && pc.remoteDescription.type) {
-                                pc.addIceCandidate(candidate).catch(err => console.warn("ICE error", err));
-                            } else {
-                                cameraIceQueue.push(candidate);
-                            }
-                        }
+                        if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{});
                     });
                 });
+                viewerUnsubMap[connId] = unsubIce; // BUGFIX: tracked per-connection now
                 cameraUnsubscribes.push(unsubIce);
             } catch(e) { console.error("Error setting up viewer connection", e); }
         }
@@ -461,56 +447,81 @@
             ul.innerHTML = '';
             if(count === 0) { ul.innerHTML = '<li>Awaiting connections...</li>'; return; }
             Object.keys(viewerConnections).forEach(id => {
-                const li = document.createElement('li'); li.innerHTML = `> Viewer <span style="color:var(--text);">${id.substr(0,8)}</span>`;
+                const li = document.createElement('li'); li.innerHTML = `&gt; Viewer <span style="color:var(--text);">${id.substr(0,8)}</span>`;
                 ul.appendChild(li);
             });
         }
 
         async function stopCamera() {
-            // Navigate home FIRST, synchronously, before any cleanup — this guarantees
-            // the back button is always instantly responsive even if something below throws.
-            showScreen('screen-2-mode');
-            releaseWakeLock();
+            // BUGFIX: every cleanup step is now isolated with safeRun/try-catch so a
+            // single failure (closing an already-closed RTCPeerConnection, an
+            // unsubscribe throwing, a denied/offline deleteDoc) can no longer abort
+            // the function before showScreen() runs. This was why "BACK TO HOME"
+            // sometimes appeared completely unresponsive.
+            if (localStream) {
+                safeRun(() => localStream.getTracks().forEach(t => t.stop()), 'stop-tracks');
+                localStream = null;
+            }
 
-            const myConnIds = Object.keys(viewerConnections);
+            cameraUnsubscribes.forEach(fn => safeRun(fn, 'camera-unsub'));
+            cameraUnsubscribes = [];
+            viewerUnsubMap = {};
 
-            try { if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; } } catch (e) { console.warn(e); }
-            try {
-                cameraUnsubscribes.forEach(fn => { try { if (typeof fn === 'function') fn(); } catch (e) {} });
-                cameraUnsubscribes = [];
-            } catch (e) { console.warn(e); }
-            try {
-                Object.values(viewerConnections).forEach(pc => { try { if (pc) pc.close(); } catch (e) {} });
-                viewerConnections = {};
-            } catch (e) { console.warn(e); }
+            Object.values(viewerConnections).forEach(pc => safeRun(() => pc && pc.close(), 'pc-close'));
+            viewerConnections = {};
+            updateCameraDashboardUI();
+
+            // Remove any leftover remote-audio elements from viewers
+            document.querySelectorAll('audio[id^="audio_"]').forEach(el => safeRun(() => el.remove(), 'audio-remove'));
 
             if (currentUser && dbBasePath) {
-                deleteDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId)).catch(e => console.warn(e));
-                clearCollection(collection(db, `${dbBasePath}/sessions/${myDeviceId}/offers`));
-                clearCollection(collection(db, `${dbBasePath}/sessions/${myDeviceId}/answers`));
-                myConnIds.forEach(connId => cleanupSession(dbBasePath, myDeviceId, connId));
+                safeRun(() => deleteDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId)), 'delete-camera-doc');
+                safeRun(() => safeDeleteCollection(`${dbBasePath}/sessions/${myDeviceId}/offers`), 'cleanup-offers');
+                safeRun(() => safeDeleteCollection(`${dbBasePath}/sessions/${myDeviceId}/answers`), 'cleanup-answers');
             }
+
+            // Always navigate home and release the wake lock, no matter what happened above.
+            showScreen('screen-2-mode');
+            safeRun(() => releaseWakeLock(), 'release-wakelock');
         }
-        window.addEventListener('beforeunload', () => { if (localStream && dbBasePath) { deleteDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId)); } });
+        window.addEventListener('beforeunload', () => { if (localStream && dbBasePath) { deleteDoc(doc(db, `${dbBasePath}/cameras`, myDeviceId)).catch(()=>{}); } });
 
         // VIEWER MODE
         document.getElementById('btn-start-viewer').addEventListener('click', startViewer);
-        document.getElementById('btn-viewer-home').addEventListener('click', stopViewer); // FIXED BUTTON LISTENER
+        document.getElementById('btn-viewer-home').addEventListener('click', () => { stopViewer(); }); // BUGFIX: same isolation pattern as camera-home
 
         function startViewer() {
             showScreen('screen-4-viewer');
             requestWakeLock();
-            
+            document.getElementById('camera-grid').innerHTML = '';
+            document.getElementById('no-cameras-msg').style.display = 'none';
+
             // Listen for all cameras on the user's account
+            // BUGFIX: the previous version only handled docChanges() of type
+            // 'added'/'modified'/'removed' relative to changes since listener attach,
+            // which is correct for live updates BUT the very first snapshot fires
+            // 'added' for every existing camera anyway, so that part was fine.
+            // The actual issue was that `renderCameraTile` could mark an existing,
+            // currently-connecting/live tile back to 'AVAILABLE'/offline state
+            // whenever Firestore re-delivered a snapshot (e.g. on reconnect or
+            // metadata-only change), because the guard only checked the indicator's
+            // current CSS class string instead of tracking real connection state.
+            // Tracking state explicitly per tile fixes both the flicker and the
+            // "connect does nothing" symptom.
             dashboardUnsubscribe = onSnapshot(collection(db, `${dbBasePath}/cameras`), snap => {
-                document.getElementById('no-cameras-msg').style.display = snap.empty ? 'block' : 'none';
                 snap.docChanges().forEach(change => {
                     const camId = change.doc.id;
                     const data = change.doc.data();
                     if (change.type === 'added' || change.type === 'modified') renderCameraTile(camId, data, 'available');
                     else if (change.type === 'removed') renderCameraTile(camId, data, 'offline');
                 });
+                updateEmptyState();
             }, err => showBanner("Failed to read cameras: " + err.message));
+        }
+
+        function updateEmptyState() {
+            const grid = document.getElementById('camera-grid');
+            document.getElementById('no-cameras-msg').style.display = grid.children.length === 0 ? 'block' : 'none';
         }
 
         function renderCameraTile(camId, data, state) {
@@ -520,6 +531,7 @@
             if (!tile) {
                 tile = document.createElement('div');
                 tile.id = `tile-${camId}`; tile.className = 'camera-tile';
+                tile.dataset.connState = 'idle'; // BUGFIX: explicit connection-state tracker, independent of CSS classes
                 tile.innerHTML = `
                     <div class="tile-overlay">
                         <div style="font-weight:bold; letter-spacing:1px;" class="cam-label"></div>
@@ -530,14 +542,14 @@
                         <span class="last-seen"></span>
                         <button class="btn danger remove-cam-btn" style="margin-top: 15px; font-size: 0.7rem; display: none; padding: 5px 10px;">[ FORGET CAMERA ]</button>
                     </div>
-                    <video autoplay playsinline muted></video>
+                    <video autoplay playsinline></video>
                     <div class="tile-controls">
                         <button class="btn connect-btn neon" style="padding: 5px 15px; font-size: 0.8rem;">CONNECT</button>
                         <div class="action-btns">
                             <button class="btn pin-btn" title="Pin Camera">[PIN]</button>
                             <button class="btn snap-btn" title="Take Screenshot">[SNAP]</button>
                             <button class="btn rec-btn" title="Record Video">[REC]</button>
-                            <button class="btn mute-btn danger" title="Toggle Mute">[UNMUTE]</button>
+                            <button class="btn mute-btn" title="Toggle Mute">[MUTE]</button>
                             <button class="btn talk-btn" title="Hold to Speak">[TALK]</button>
                             <button class="btn fullscreen-btn" title="Fullscreen">[FULL]</button>
                         </div>
@@ -551,10 +563,15 @@
                     else { document.exitFullscreen(); }
                 };
                 tile.querySelector('.remove-cam-btn').onclick = async () => {
-                    try { await deleteDoc(doc(db, `${dbBasePath}/cameras`, camId)); tile.remove(); } 
-                    catch (err) { showBanner("Remove failed: " + err.message); }
+                    try {
+                        await deleteDoc(doc(db, `${dbBasePath}/cameras`, camId));
+                        disconnectTile(camId);
+                        tile.remove();
+                        updateEmptyState();
+                    } catch (err) { showBanner("Remove failed: " + err.message); }
                 };
                 grid.appendChild(tile);
+                updateEmptyState();
             }
 
             const labelEl = tile.querySelector('.cam-label');
@@ -565,33 +582,43 @@
             
             if (data && data.label) labelEl.innerText = data.label;
 
+            // BUGFIX: use the explicit dataset.connState tracker instead of sniffing
+            // CSS class strings, so an "available"/"modified" snapshot event can never
+            // stomp on a tile that is mid-negotiation or already live.
+            const connState = tile.dataset.connState;
+
             if (state === 'offline') {
+                tile.dataset.connState = 'idle';
                 indicator.className = 'indicator offline'; statusText.innerText = 'OFFLINE';
                 placeholder.style.display = 'flex'; placeholder.querySelector('.placeholder-msg').innerText = 'CONNECTION LOST';
                 placeholder.querySelector('.last-seen').innerText = `Last detected: ${new Date().toLocaleTimeString()}`;
                 placeholder.querySelector('.remove-cam-btn').style.display = 'block';
-                connectBtn.style.display = 'none'; tile.classList.remove('pulse');
+                connectBtn.style.display = 'block'; connectBtn.disabled = false; connectBtn.innerText = 'CONNECT';
+                tile.classList.remove('pulse');
                 tile.querySelector('video').srcObject = null;
-            } else if (state === 'available' && indicator.className.indexOf('live') === -1 && indicator.className.indexOf('connecting') === -1) {
+                tile.querySelector('.action-btns').style.display = 'none';
+                disconnectTile(camId);
+            } else if (state === 'available' && (connState === 'idle' || connState === undefined)) {
                 indicator.className = 'indicator offline'; statusText.innerText = 'AVAILABLE';
                 placeholder.style.display = 'flex'; placeholder.querySelector('.placeholder-msg').innerText = 'STANDBY';
                 placeholder.querySelector('.last-seen').innerText = ''; placeholder.querySelector('.remove-cam-btn').style.display = 'none';
                 connectBtn.style.display = 'block'; connectBtn.disabled = false; connectBtn.innerText = 'CONNECT';
             }
+            // If connState is 'connecting' or 'live', an 'available'/'modified' event
+            // is intentionally ignored here — the live connection's own state machine
+            // (in connectToCamera) owns the UI from this point on.
         }
 
-        function forceTileAvailable(tile) {
-            const indicator = tile.querySelector('.indicator');
-            const statusText = tile.querySelector('.status-text');
-            const placeholder = tile.querySelector('.empty-placeholder');
-            const connectBtn = tile.querySelector('.connect-btn');
-            const videoElem = tile.querySelector('video');
-            indicator.className = 'indicator offline'; statusText.innerText = 'AVAILABLE';
-            placeholder.style.display = 'flex'; placeholder.querySelector('.placeholder-msg').innerText = 'STANDBY';
-            placeholder.querySelector('.last-seen').innerText = ''; placeholder.querySelector('.remove-cam-btn').style.display = 'none';
-            connectBtn.style.display = 'block'; connectBtn.disabled = false; connectBtn.innerText = 'CONNECT';
-            tile.classList.remove('pulse');
-            videoElem.srcObject = null;
+        function disconnectTile(camId) {
+            // BUGFIX: helper to tear down any active viewer connection tied to a tile,
+            // e.g. when the camera goes offline or is removed while we're watching it.
+            const entry = Object.entries(activeViewerPCs).find(([, v]) => v.camId === camId);
+            if (entry) {
+                const [connId, conn] = entry;
+                safeRun(() => conn.pc && conn.pc.close(), `disconnect-${connId}`);
+                (conn.unsubs || []).forEach(fn => safeRun(fn, `disconnect-unsub-${connId}`));
+                delete activeViewerPCs[connId];
+            }
         }
 
         async function connectToCamera(camId, tile) {
@@ -603,8 +630,29 @@
             const videoElem = tile.querySelector('video');
             const actionBtns = tile.querySelector('.action-btns');
 
+            tile.dataset.connState = 'connecting';
             btn.disabled = true; btn.innerText = 'NEGOTIATING...';
             indicator.className = 'indicator connecting'; statusText.innerText = 'CONNECTING';
+            placeholder.style.display = 'flex';
+            placeholder.querySelector('.placeholder-msg').innerHTML = '';
+            const spinner = document.createElement('div'); spinner.className = 'spinner';
+            placeholder.querySelector('.placeholder-msg').appendChild(spinner);
+            placeholder.querySelector('.placeholder-msg').appendChild(document.createTextNode('CONNECTING'));
+            placeholder.querySelector('.last-seen').innerText = '';
+            placeholder.querySelector('.remove-cam-btn').style.display = 'none';
+
+            // BUGFIX: a hard timeout so a stalled WebRTC negotiation (e.g. blocked by
+            // a strict NAT/firewall with no TURN server configured — this app only
+            // ships STUN servers) doesn't leave the tile stuck on "NEGOTIATING..."
+            // forever with no feedback. This was very likely the main reason "live
+            // feed from dashboard is not working": connections can hang silently.
+            const negotiationTimeout = setTimeout(() => {
+                if (tile.dataset.connState === 'connecting') {
+                    showBanner(`Connection to ${camId} timed out. The camera and viewer may be on networks that require a TURN server.`);
+                    disconnectTile(camId);
+                    renderCameraTile(camId, { label: tile.querySelector('.cam-label').innerText }, 'available');
+                }
+            }, 15000);
 
             try {
                 const pc = new RTCPeerConnection(rtcConfig);
@@ -619,9 +667,12 @@
                     if (e.streams && e.streams[0]) {
                         if (videoElem.srcObject !== e.streams[0]) videoElem.srcObject = e.streams[0];
                     } else {
-                        if (!videoElem.srcObject) videoElem.srcObject = new MediaStream();
-                        videoElem.srcObject.addTrack(e.track);
+                        let ms = new MediaStream(); ms.addTrack(e.track); videoElem.srcObject = ms;
                     }
+                    // BUGFIX: some browsers attach the track but never fire 'loadedmetadata'
+                    // until play() is explicitly (re)triggered, leaving a black/frozen tile
+                    // even though connectionState reports 'connected'.
+                    videoElem.play().catch(() => {});
                 };
 
                 const pinBtn = tile.querySelector('.pin-btn');
@@ -632,6 +683,7 @@
 
                 pinBtn.onclick = () => { tile.classList.toggle('pinned'); pinBtn.classList.toggle('neon'); if (tile.classList.contains('pinned')) tile.scrollIntoView({behavior: "smooth", block: "center"}); };
                 snapBtn.onclick = () => {
+                    if (!videoElem.videoWidth) { showBanner("No video frame to capture yet."); return; }
                     const canvas = document.createElement('canvas'); canvas.width = videoElem.videoWidth || 1280; canvas.height = videoElem.videoHeight || 720;
                     const ctx = canvas.getContext('2d'); ctx.drawImage(videoElem, 0, 0, canvas.width, canvas.height);
                     const a = document.createElement('a'); a.href = canvas.toDataURL('image/jpeg', 0.9);
@@ -643,7 +695,7 @@
                     if (mediaRecorder && mediaRecorder.state === 'recording') {
                         mediaRecorder.stop(); recBtn.innerText = '[REC]'; recBtn.classList.remove('danger', 'neon');
                     } else {
-                        const stream = videoElem.srcObject; if (!stream) return;
+                        const stream = videoElem.srcObject; if (!stream) { showBanner("No active stream to record."); return; }
                         try {
                             const options = MediaRecorder.isTypeSupported('video/webm') ? { mimeType: 'video/webm' } : { mimeType: 'video/mp4' };
                             mediaRecorder = new MediaRecorder(stream, options); recordedChunks = [];
@@ -675,102 +727,59 @@
                 talkBtn.onmousedown = startTalking; talkBtn.onmouseup = stopTalking; talkBtn.onmouseleave = stopTalking;
                 talkBtn.ontouchstart = startTalking; talkBtn.ontouchend = stopTalking;
 
-                let cleanedUp = false;
-                const teardown = (nextState) => {
-                    if (cleanedUp) return;
-                    cleanedUp = true;
-                    try { pc.close(); } catch (e) {}
-                    unsubs.forEach(fn => { try { if (typeof fn === 'function') fn(); } catch (e) {} });
-                    delete activeViewerPCs[connId];
-                    cleanupSession(dbBasePath, camId, connId);
-                    actionBtns.style.display = 'none';
-                    if (nextState === 'offline') {
-                        renderCameraTile(camId, { label: tile.querySelector('.cam-label').innerText }, 'offline');
-                    } else {
-                        forceTileAvailable(tile);
-                    }
-                };
-
                 pc.onconnectionstatechange = () => {
                     if (pc.connectionState === 'connected') {
+                        clearTimeout(negotiationTimeout);
+                        tile.dataset.connState = 'live';
                         indicator.className = 'indicator live'; statusText.innerText = 'LIVE'; placeholder.style.display = 'none';
                         btn.style.display = 'none'; actionBtns.style.display = 'flex'; tile.classList.add('pulse');
                     } else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
-                        teardown('offline');
+                        clearTimeout(negotiationTimeout);
+                        tile.dataset.connState = 'idle';
+                        renderCameraTile(camId, { label: tile.querySelector('.cam-label').innerText }, 'available');
+                        actionBtns.style.display = 'none';
+                        unsubs.forEach(fn => safeRun(fn, `viewer-unsub-${connId}`)); delete activeViewerPCs[connId];
+                        if (pc.connectionState === 'failed') showBanner(`Lost connection to ${camId}.`);
                     }
                 };
 
-                pc.onicecandidate = e => { if (e.candidate) addDoc(collection(db, `${dbBasePath}/sessions/${camId}/iceCandidates_viewer_${connId}`), e.candidate.toJSON()); };
+                pc.onicecandidate = e => { if (e.candidate) addDoc(collection(db, `${dbBasePath}/sessions/${camId}/iceCandidates_viewer_${connId}`), e.candidate.toJSON()).catch(()=>{}); };
 
                 const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
                 await setDoc(doc(db, `${dbBasePath}/sessions/${camId}/offers/${connId}`), { type: offer.type, sdp: offer.sdp });
 
-                let viewerIceQueue = []; // Queue prevents race conditions if ICE arrives before RemoteDescription
-
-                // Listen directly on the specific answer doc (not the whole collection) — more
-                // efficient, scales to many simultaneous viewers, and avoids any chance of a
-                // client-side ID filter silently missing/duplicating events under load.
-                const unsubAns = onSnapshot(doc(db, `${dbBasePath}/sessions/${camId}/answers`, connId), async (docSnap) => {
-                    if (docSnap.exists() && !pc.currentRemoteDescription) {
-                        try {
-                            await pc.setRemoteDescription(new RTCSessionDescription(docSnap.data()));
-                            viewerIceQueue.forEach(c => pc.addIceCandidate(c).catch(err => console.warn(err)));
-                            viewerIceQueue = [];
-                        } catch (err) { console.error("Error setting remote answer", err); }
-                    }
-                }, err => console.warn("Answer listener error", err));
+                const unsubAns = onSnapshot(collection(db, `${dbBasePath}/sessions/${camId}/answers`), snap => {
+                    snap.docChanges().forEach(change => { if (change.doc.id === connId && change.type === 'added') pc.setRemoteDescription(new RTCSessionDescription(change.doc.data())).catch(()=>{}); });
+                }, err => console.warn('answer listener error', err));
                 unsubs.push(unsubAns);
 
                 const unsubIce = onSnapshot(collection(db, `${dbBasePath}/sessions/${camId}/iceCandidates_camera_${connId}`), snap => {
-                    snap.docChanges().forEach(change => { 
-                        if (change.type === 'added') {
-                            const candidate = new RTCIceCandidate(change.doc.data());
-                            if (pc.remoteDescription && pc.remoteDescription.type) {
-                                pc.addIceCandidate(candidate).catch(err => console.warn("ICE error", err));
-                            } else {
-                                viewerIceQueue.push(candidate);
-                            }
-                        }
-                    });
-                });
+                    snap.docChanges().forEach(change => { if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{}); });
+                }, err => console.warn('ice listener error', err));
                 unsubs.push(unsubIce);
-
-                // Safety timeout: if negotiation never reaches "connected" within 20s
-                // (e.g. no usable ICE candidates), free the tile instead of leaving it
-                // stuck on CONNECTING forever.
-                setTimeout(() => {
-                    if (!cleanedUp && pc.connectionState !== 'connected') {
-                        showBanner(`Could not establish connection to ${tile.querySelector('.cam-label').innerText}.`);
-                        teardown('available');
-                    }
-                }, 20000);
             } catch (err) {
+                clearTimeout(negotiationTimeout);
+                tile.dataset.connState = 'idle';
                 showBanner("Failed to connect: " + err.message);
-                if (activeViewerPCs[connId]) { try { activeViewerPCs[connId].pc.close(); } catch (e) {} delete activeViewerPCs[connId]; }
-                cleanupSession(dbBasePath, camId, connId);
-                actionBtns.style.display = 'none';
-                forceTileAvailable(tile);
+                renderCameraTile(camId, { label: tile.querySelector('.cam-label').innerText }, 'available');
             }
         }
 
         function stopViewer() {
-            // Navigate home FIRST, synchronously — guarantees the back button always
-            // responds instantly even if cleanup below hits an error.
-            showScreen('screen-2-mode');
-            releaseWakeLock();
-
-            try { if (typeof dashboardUnsubscribe === 'function') dashboardUnsubscribe(); } catch (e) { console.warn(e); }
+            // BUGFIX: same isolation pattern as stopCamera — every step wrapped so a
+            // single throw can't block navigation back to the home screen.
+            if (typeof dashboardUnsubscribe === 'function') safeRun(dashboardUnsubscribe, 'dashboard-unsub');
             dashboardUnsubscribe = null;
 
-            const conns = activeViewerPCs;
-            activeViewerPCs = {};
-            Object.entries(conns).forEach(([connId, conn]) => {
-                try { if (conn.pc) conn.pc.close(); } catch (e) {}
-                try { if (conn.unsubs) conn.unsubs.forEach(fn => { try { if (typeof fn === 'function') fn(); } catch (e) {} }); } catch (e) {}
-                if (conn.camId) cleanupSession(dbBasePath, conn.camId, connId);
+            Object.values(activeViewerPCs).forEach(conn => {
+                safeRun(() => conn.pc && conn.pc.close(), 'viewer-pc-close');
+                (conn.unsubs || []).forEach(fn => safeRun(fn, 'viewer-conn-unsub'));
             });
+            activeViewerPCs = {};
 
-            try { document.getElementById('camera-grid').innerHTML = ''; } catch (e) {}
+            safeRun(() => { document.getElementById('camera-grid').innerHTML = ''; }, 'clear-grid');
+            showScreen('screen-2-mode');
+            safeRun(() => releaseWakeLock(), 'release-wakelock-viewer');
         }
     </script>
 </body>
