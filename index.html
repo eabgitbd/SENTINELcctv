@@ -136,6 +136,16 @@
             animation: spin 0.8s linear infinite; margin-bottom: 8px;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* --- DIAGNOSTICS --- */
+        .diag-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid #2a2a32; gap: 15px; }
+        .diag-row:last-child { border-bottom: none; }
+        .diag-label { color: #aaa; flex-shrink: 0; }
+        .diag-value { text-align: right; word-break: break-all; }
+        .diag-pass { color: var(--accent); }
+        .diag-fail { color: var(--error); }
+        .diag-pending { color: var(--warning); }
+        .diag-detail { display: block; font-size: 0.75rem; color: #666; margin-top: 4px; text-align: right; }
     </style>
 </head>
 <body>
@@ -173,6 +183,22 @@
                     <div>[ WATCH LIVE FEEDS ]</div>
                     <div style="font-size: 0.8rem; margin-top: 10px; color: var(--text);">Open dashboard</div>
                 </button>
+            </div>
+            <div style="text-align:center; margin-top: 10px;">
+                <button id="btn-diagnostics" class="btn" style="padding: 8px 16px; font-size: 0.8rem; border-color:#444; color:#888;">[ RUN DIAGNOSTICS ]</button>
+            </div>
+        </section>
+
+        <!-- SCREEN 5: DIAGNOSTICS -->
+        <section id="screen-5-diagnostics" class="screen">
+            <div style="max-width: 700px; margin: 0 auto;">
+                <div class="cam-header">
+                    <button id="btn-diagnostics-home" class="btn danger" style="padding: 6px 12px; font-size: 0.85rem;">&lt; BACK TO HOME</button>
+                    <h2 style="margin:0;">SYSTEM DIAGNOSTICS</h2>
+                </div>
+                <p style="color:#888; font-size:0.85rem;">Run this on BOTH the camera device and the viewer device. Compare the "Account ID" line — it must be identical on both, or they can never see each other.</p>
+                <div id="diag-results" style="background: var(--panel); border: 1px solid #333; border-radius: 6px; padding: 15px; font-size: 0.9rem;"></div>
+                <button id="btn-rerun-diagnostics" class="btn neon" style="margin-top: 15px; width: 100%;">RE-RUN CHECKS</button>
             </div>
         </section>
 
@@ -437,6 +463,126 @@
             await safeRun(() => stopViewer(), 'logout-stopViewer');
             await signOut(auth);
         });
+
+        // DIAGNOSTICS
+        document.getElementById('btn-diagnostics').addEventListener('click', () => { showScreen('screen-5-diagnostics'); runDiagnostics(); });
+        document.getElementById('btn-diagnostics-home').addEventListener('click', () => { showScreen('screen-2-mode'); });
+        document.getElementById('btn-rerun-diagnostics').addEventListener('click', runDiagnostics);
+
+        function diagRow(label, status, detail) {
+            // status: 'pass' | 'fail' | 'pending'
+            const cls = status === 'pass' ? 'diag-pass' : status === 'fail' ? 'diag-fail' : 'diag-pending';
+            const symbol = status === 'pass' ? '✓' : status === 'fail' ? '✗' : '…';
+            return `<div class="diag-row">
+                <span class="diag-label">${label}</span>
+                <span class="diag-value ${cls}">${symbol}${detail ? `<span class="diag-detail">${detail}</span>` : ''}</span>
+            </div>`;
+        }
+
+        // BUGFIX / DIAGNOSTIC TOOL: a single, visible, step-by-step health check that
+        // tests every layer this app depends on, in order, so a failure is pinpointed
+        // instead of guessed at. Run this on BOTH the camera and viewer device and
+        // compare results — that comparison is the fastest way to find a mismatch.
+        async function runDiagnostics() {
+            const out = document.getElementById('diag-results');
+            const results = [];
+            const render = () => { out.innerHTML = results.map(r => diagRow(r.label, r.status, r.detail)).join(''); };
+
+            results.push({ label: 'Browser WebRTC support', status: 'pending' });
+            results.push({ label: 'Signed in', status: 'pending' });
+            results.push({ label: 'Account ID', status: 'pending' });
+            results.push({ label: 'Firestore write', status: 'pending' });
+            results.push({ label: 'Firestore read', status: 'pending' });
+            results.push({ label: 'Camera collection visible', status: 'pending' });
+            results.push({ label: 'Camera/mic access', status: 'pending' });
+            results.push({ label: 'ICE candidate gathering (STUN)', status: 'pending' });
+            render();
+
+            // 1. WebRTC support
+            const hasRTC = typeof RTCPeerConnection !== 'undefined';
+            results[0] = { label: 'Browser WebRTC support', status: hasRTC ? 'pass' : 'fail', detail: hasRTC ? navigator.userAgent.substring(0, 60) : 'This browser has no WebRTC support at all.' };
+            render();
+
+            // 2. Auth
+            if (!currentUser) {
+                results[1] = { label: 'Signed in', status: 'fail', detail: 'Not logged in.' };
+                render();
+                return;
+            }
+            results[1] = { label: 'Signed in', status: 'pass', detail: currentUser.isAnonymous ? 'ANONYMOUS — this is almost certainly your problem, see below' : (currentUser.email || currentUser.displayName || 'Google account') };
+            results[2] = { label: 'Account ID', status: currentUser.isAnonymous ? 'fail' : 'pass', detail: currentUser.uid };
+            render();
+
+            // 3. Firestore write
+            const probeDoc = doc(db, `${dbBasePath}/_diagnostics`, 'probe');
+            try {
+                await setDoc(probeDoc, { ts: serverTimestamp(), from: myDeviceId });
+                results[3] = { label: 'Firestore write', status: 'pass', detail: `path: ${dbBasePath}/_diagnostics/probe` };
+            } catch (err) {
+                results[3] = { label: 'Firestore write', status: 'fail', detail: `${err.code || ''} ${err.message}` };
+                render();
+                // Can't usefully continue past this — everything downstream needs writes to work.
+                results[4] = { label: 'Firestore read', status: 'fail', detail: 'Skipped — write already failed' };
+                results[5] = { label: 'Camera collection visible', status: 'fail', detail: 'Skipped — write already failed' };
+                render();
+                if (err.code !== 'permission-denied') {
+                    results[6] = { label: 'Camera/mic access', status: 'fail', detail: 'Skipped' };
+                    results[7] = { label: 'ICE candidate gathering (STUN)', status: 'fail', detail: 'Skipped' };
+                    render();
+                }
+                return;
+            }
+            render();
+
+            // 4. Firestore read
+            try {
+                const snap = await getDocs(collection(db, `${dbBasePath}/_diagnostics`));
+                results[4] = { label: 'Firestore read', status: 'pass', detail: `${snap.size} doc(s) found` };
+            } catch (err) {
+                results[4] = { label: 'Firestore read', status: 'fail', detail: `${err.code || ''} ${err.message}` };
+            }
+            render();
+
+            // 5. Can this account see the cameras collection (what the dashboard actually queries)
+            try {
+                const camSnap = await getDocs(collection(db, `${dbBasePath}/cameras`));
+                const camList = camSnap.docs.map(d => `${d.id} (${d.data().label || 'no label'})`).join(', ') || 'none registered right now';
+                results[5] = { label: 'Camera collection visible', status: 'pass', detail: camList };
+            } catch (err) {
+                results[5] = { label: 'Camera collection visible', status: 'fail', detail: `${err.code || ''} ${err.message}` };
+            }
+            render();
+
+            // 6. Camera/mic permission (only tests, doesn't keep the stream open)
+            try {
+                const testStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                testStream.getTracks().forEach(t => t.stop());
+                results[6] = { label: 'Camera/mic access', status: 'pass' };
+            } catch (err) {
+                results[6] = { label: 'Camera/mic access', status: 'fail', detail: err.name || err.message };
+            }
+            render();
+
+            // 7. Can we actually gather ICE candidates at all (proves STUN reachability,
+            // i.e. that this network even allows the UDP traffic WebRTC needs)
+            try {
+                const candidateCount = await new Promise((resolve, reject) => {
+                    const testPc = new RTCPeerConnection(rtcConfig);
+                    let count = 0;
+                    const t = setTimeout(() => { testPc.close(); resolve(count); }, 5000);
+                    testPc.onicecandidate = e => {
+                        if (e.candidate) { count++; }
+                        else { clearTimeout(t); testPc.close(); resolve(count); }
+                    };
+                    testPc.createDataChannel('probe');
+                    testPc.createOffer().then(o => testPc.setLocalDescription(o)).catch(reject);
+                });
+                results[7] = { label: 'ICE candidate gathering (STUN)', status: candidateCount > 0 ? 'pass' : 'fail', detail: candidateCount > 0 ? `${candidateCount} candidate(s) gathered` : 'Zero candidates — this network/browser is blocking STUN/UDP entirely.' };
+            } catch (err) {
+                results[7] = { label: 'ICE candidate gathering (STUN)', status: 'fail', detail: err.message };
+            }
+            render();
+        }
 
         // CAMERA MODE
         document.getElementById('btn-start-camera').addEventListener('click', startCamera);
