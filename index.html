@@ -280,6 +280,14 @@
         let wakeLock = null;
 
         // ---- SAFETY HELPERS ----
+        const withTimeout = (promise, ms, timeoutMsg) => {
+            let timer;
+            const timeoutPromise = new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(timeoutMsg)), ms);
+            });
+            return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+        };
+
         function safeRun(fn, label) {
             try { 
                 const result = fn();
@@ -330,8 +338,16 @@
         async function probeFirestoreAccess(uid) {
             const probePath = `users/${uid}/_diagnostics`;
             try {
-                await setDoc(doc(db, probePath, 'probe'), { ts: serverTimestamp() });
-                await getDocs(collection(db, probePath));
+                await withTimeout(
+                    setDoc(doc(db, probePath, 'probe'), { ts: serverTimestamp() }),
+                    5000,
+                    'Firestore timeout. Did you create the database?'
+                );
+                await withTimeout(
+                    getDocs(collection(db, probePath)),
+                    5000,
+                    'Firestore timeout on read.'
+                );
                 console.log('[diagnostics] Firestore read/write OK for', uid);
             } catch (err) {
                 console.error('[diagnostics] Firestore access probe failed:', err);
@@ -455,7 +471,11 @@
 
             const probeDoc = doc(db, `${dbBasePath}/_diagnostics`, 'probe');
             try {
-                await setDoc(probeDoc, { ts: serverTimestamp(), from: myDeviceId });
+                await withTimeout(
+                    setDoc(probeDoc, { ts: serverTimestamp(), from: myDeviceId }),
+                    5000,
+                    'TIMEOUT - Firestore Database likely NOT CREATED in Firebase Console, or websockets blocked.'
+                );
                 results[3] = { label: 'Firestore write', status: 'pass', detail: `path: ${dbBasePath}/_diagnostics/probe` };
             } catch (err) {
                 results[3] = { label: 'Firestore write', status: 'fail', detail: `${err.code || ''} ${err.message}` };
@@ -473,7 +493,11 @@
             render();
 
             try {
-                const snap = await getDocs(collection(db, `${dbBasePath}/_diagnostics`));
+                const snap = await withTimeout(
+                    getDocs(collection(db, `${dbBasePath}/_diagnostics`)),
+                    5000,
+                    'TIMEOUT - Read hanging.'
+                );
                 results[4] = { label: 'Firestore read', status: 'pass', detail: `${snap.size} doc(s) found` };
             } catch (err) {
                 results[4] = { label: 'Firestore read', status: 'fail', detail: `${err.code || ''} ${err.message}` };
@@ -481,7 +505,11 @@
             render();
 
             try {
-                const camSnap = await getDocs(collection(db, `${dbBasePath}/cameras`));
+                const camSnap = await withTimeout(
+                    getDocs(collection(db, `${dbBasePath}/cameras`)),
+                    5000,
+                    'TIMEOUT - Read hanging.'
+                );
                 const camList = camSnap.docs.map(d => `${d.id} (${d.data().label || 'no label'})`).join(', ') || 'none registered right now';
                 results[5] = { label: 'Camera collection visible', status: 'pass', detail: camList };
             } catch (err) {
