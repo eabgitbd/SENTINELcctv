@@ -306,22 +306,71 @@
             } catch (err) { /* best-effort cleanup only */ }
         }
 
-        // WAKE LOCK UTILS
+        // ==========================================
+        // WAKE LOCK UTILS (UPGRADED)
+        // ==========================================
+        let wakeLockRequested = false;
+
         async function requestWakeLock() {
+            wakeLockRequested = true;
             if ('wakeLock' in navigator) {
-                try { wakeLock = await navigator.wakeLock.request('screen'); } catch (err) { console.warn("Wake Lock Error"); }
+                try {
+                    if (wakeLock !== null) return;
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    wakeLock.addEventListener('release', () => {
+                        wakeLock = null;
+                        // Automatically reacquire lock if tab becomes visible again and lock was still expected
+                        if (wakeLockRequested && document.visibilityState === 'visible') {
+                            requestWakeLock();
+                        }
+                    });
+                } catch (err) {
+                    console.warn("Wake Lock Error:", err);
+                    enableFallbackWakeLock(); // Fallback if API fails
+                }
+            } else {
+                enableFallbackWakeLock(); // Fallback for unsupported browsers (iOS)
             }
         }
+
         async function releaseWakeLock() {
-            if (wakeLock !== null) { try { await wakeLock.release(); wakeLock = null; } catch (err) {} }
+            wakeLockRequested = false;
+            if (wakeLock !== null) {
+                try { await wakeLock.release(); wakeLock = null; } catch (err) {}
+            }
+            disableFallbackWakeLock();
         }
+
+        let fallbackVideo = null;
+        function enableFallbackWakeLock() {
+            if (fallbackVideo) return;
+            // Create a tiny, completely invisible repeating video element.
+            // This is the industry-standard "NoSleep.js" trick to keep older mobile browsers fully awake.
+            fallbackVideo = document.createElement('video');
+            fallbackVideo.setAttribute('playsinline', '');
+            fallbackVideo.setAttribute('muted', '');
+            fallbackVideo.setAttribute('loop', '');
+            fallbackVideo.style.cssText = 'position:fixed; top:0; left:0; width:1px; height:1px; opacity:0.01; pointer-events:none; z-index:-9999;';
+            fallbackVideo.src = 'data:video/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMQAAAAhmcmVlAAAAG21kYXQAAAGzABAHAAABthBv/P/pA8BThgAAAAAARW1vb3YAAABsbXZoZAAAAAB8JQIAfCUCAAAAAAABAAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAGGlvZHMAAAAAEwICAAEAAAACAQIAAQAAAAIvdHJhawAAAFx0a2hkAAAAA3wlAgB8JQIAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAABAAAAAAABAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAABAAAAAAABAAAAAAABqW1kaWEAAAAgbWRoZAAAAAB8JQIAfCUCAAAAAAABAAAAAAABAAAAAABXaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAABU21pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAASFzdGJsAAAAr3N0c2QAAAAAAAAAAQAAAJ9hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAEAAABIAAAASABIAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABXAAAAAAAAAABR//8AAAAxYXZjQwH0AAr/4QAaZ/QACqywEAAAAwEAAAMhAAk2uGE2oAAB1gC1yAAAABhoZXZhAQAAAAAAAAABAAADAAAAAWVtcHR5AAAADHN0dHMAAAAAAAAAAQAAAAEAAAABAAAAKHN0c3oAAAAAAAAAAAAAAAEAAAAYAAAAFHN0c2MAAAAAAAAAAQAAAAEAAAABAAAAAQAAABRzdGNvAAAAAAAAAAEAAAAqAAAAGHN0c3MAAAAAAAAAAQAAAAE=';
+            document.body.appendChild(fallbackVideo);
+            fallbackVideo.play().catch(e => console.warn('Fallback wake lock failed', e));
+        }
+
+        function disableFallbackWakeLock() {
+            if (fallbackVideo) {
+                fallbackVideo.pause();
+                fallbackVideo.remove();
+                fallbackVideo = null;
+            }
+        }
+
+        // Handle tab switches. The browser drops the wake lock automatically when the tab is hidden.
         document.addEventListener('visibilitychange', async () => {
-            if (document.visibilityState === 'visible') {
-                if (document.getElementById('screen-3-camera').classList.contains('active') || document.getElementById('screen-4-viewer').classList.contains('active')) {
-                    await requestWakeLock();
-                }
+            if (document.visibilityState === 'visible' && wakeLockRequested) {
+                await requestWakeLock();
             }
         });
+        // ==========================================
 
         // UI UTILS
         function showScreen(id) {
@@ -574,6 +623,8 @@
                 document.getElementById('local-video').srcObject = localStream;
                 document.getElementById('my-device-id-display').innerText = `ID: ${myDeviceId}`;
                 showScreen('screen-3-camera');
+                
+                // Initialize the upgraded Wake Lock functionality
                 await requestWakeLock();
 
                 await safeDeleteCollection(`${dbBasePath}/sessions/${myDeviceId}/offers`);
@@ -716,7 +767,10 @@
 
         function startViewer() {
             showScreen('screen-4-viewer');
+            
+            // Initialize the upgraded Wake Lock functionality
             requestWakeLock();
+            
             document.getElementById('camera-grid').innerHTML = '';
             document.getElementById('no-cameras-msg').style.display = 'none';
 
